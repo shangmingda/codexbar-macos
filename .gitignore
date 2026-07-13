@@ -1,0 +1,10 @@
+.DS_Store
+.build/
+dist/
+DerivedData/
+*.xcuserstate
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.swiftpm/xcode/package.xcworkspace/xcuserdata/

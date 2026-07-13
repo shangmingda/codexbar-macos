@@ -1,0 +1,54 @@
+import CodexBarCore
+import Foundation
+
+@main
+struct SelfTests {
+    static func main() throws {
+        var passed = 0
+        func check(_ condition: @autoclosure () -> Bool, _ name: String) throws {
+            guard condition() else {
+                FileHandle.standardError.write(Data("FAIL: \(name)\n".utf8))
+                throw TestFailure.failed(name)
+            }
+            passed += 1
+            print("PASS: \(name)")
+        }
+
+        let weeklyData = Data(#"{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":7,"windowDurationMins":10080,"resetsAt":1784512696},"secondary":null}}}"#.utf8)
+        let weekly = try unwrap(RateLimitClient.parseResponse(weeklyData)?.get(), "weekly parse")
+        try check(weekly.count == 1, "仅周额度只生成一个窗口")
+        try check(weekly[0].shortLabel == "周" && weekly[0].remainingPercent == 93, "周额度剩余百分比")
+
+        let dualData = Data(#"{"id":2,"result":{"rateLimitsByLimitId":{"codex":{"limitId":"codex","primary":{"usedPercent":70,"windowDurationMins":300,"resetsAt":1784512696},"secondary":{"usedPercent":30,"windowDurationMins":10080,"resetsAt":1784512696}}}}}"#.utf8)
+        let dual = try unwrap(RateLimitClient.parseResponse(dualData)?.get(), "dual parse")
+        try check(dual.map(\.shortLabel) == ["5h", "周"], "五小时和周额度自动分类")
+        try check(dual.map(\.remainingPercent) == [30, 70], "双窗口剩余百分比")
+        try check(StatusTitleFormatter.lines(windows: dual, taskCount: 2).count == 2, "双窗口菜单栏两行")
+        try check(StatusTitleFormatter.lines(windows: dual, taskCount: 2)[0].hasPrefix("2项 · 5h 30%"), "任务数合并进菜单栏")
+
+        let taskData = Data(#"[{"thread_id":"abc","title":"开发状态栏","objective":"目标","cwd":"/tmp/work","tokens_used":12,"time_used_seconds":5,"updated_at_ms":1000,"is_goal":1,"is_running":1}]"#.utf8)
+        let tasks = try TaskStore.decodeRows(taskData)
+        try check(tasks.count == 1 && tasks[0].title == "开发状态栏", "任务行解析")
+        try check(tasks[0].deepLink?.absoluteString == "codex://threads/abc", "任务深链")
+        try check(tasks[0].isGoal && tasks[0].isRunning, "Goal 与普通运行状态可同时标记")
+
+        let startedLine = #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}"#
+        let completedLine = #"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}"#
+        try check(TaskStore.latestLifecycleEvent(in: Data((startedLine + "\n").utf8)) == .started, "普通任务开始事件识别")
+        try check(TaskStore.latestLifecycleEvent(in: Data((startedLine + "\n" + completedLine + "\n").utf8)) == .completed, "普通任务完成事件识别")
+        try check(LaunchCompanionPolicy.shouldLaunchCodexBar(codexIsRunning: true, codexBarIsRunning: false), "Codex 启动且工具未运行时联动启动")
+        try check(!LaunchCompanionPolicy.shouldLaunchCodexBar(codexIsRunning: true, codexBarIsRunning: true), "工具已运行时不重复启动")
+        try check(!LaunchCompanionPolicy.shouldLaunchCodexBar(codexIsRunning: false, codexBarIsRunning: false), "Codex 未运行时不误启动")
+        try check(QuotaWindow(id: "a", usedPercent: 150, durationMinutes: 300, resetsAt: nil).remainingPercent == 0, "百分比上限保护")
+        try check(QuotaWindow(id: "b", usedPercent: -1, durationMinutes: 300, resetsAt: nil).remainingPercent == 100, "百分比下限保护")
+
+        print("\n\(passed) 项测试全部通过")
+    }
+
+    private static func unwrap<T>(_ value: T?, _ name: String) throws -> T {
+        guard let value else { throw TestFailure.failed(name) }
+        return value
+    }
+}
+
+enum TestFailure: Error { case failed(String) }
