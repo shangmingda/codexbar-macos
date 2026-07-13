@@ -4,21 +4,32 @@ import Foundation
 @main
 struct Diagnostics {
     static func main() async {
+        let tasksOnly = CommandLine.arguments.contains("--tasks-only")
+        let quotaOnly = CommandLine.arguments.contains("--quota-only")
         var output: [String: Any] = ["timestamp": ISO8601DateFormatter().string(from: Date())]
-        do {
-            let quotas = try await RateLimitClient().fetch()
-            output["quota"] = quotas.map { [
+        if !tasksOnly { do {
+            let rateLimitData = try await RateLimitClient().fetch()
+            output["quota"] = rateLimitData.windows.map { [
                 "label": $0.shortLabel,
                 "usedPercent": $0.usedPercent,
                 "remainingPercent": $0.remainingPercent,
                 "durationMinutes": $0.durationMinutes as Any,
                 "resetsAt": $0.resetsAt.map { ISO8601DateFormatter().string(from: $0) } as Any
             ] }
-        } catch { output["quotaError"] = error.localizedDescription }
-        do {
+            output["resetCreditAvailableCount"] = rateLimitData.resetCreditAvailableCount
+            output["resetCreditDetailsComplete"] = rateLimitData.resetCreditDetailsComplete
+            output["resetCredits"] = rateLimitData.resetCredits.map { [
+                "id": $0.id,
+                "status": $0.status,
+                "expiresAt": $0.expiresAt.map { ISO8601DateFormatter().string(from: $0) } as Any,
+                "expiryLabel": $0.expiryLabel,
+                "title": $0.title as Any
+            ] }
+        } catch { output["quotaError"] = error.localizedDescription } }
+        if !quotaOnly { do {
             let tasks = try await TaskStore().fetchActiveTasks()
             output["activeTasks"] = tasks.map { ["id": $0.id, "title": $0.title, "cwd": $0.cwd, "isGoal": $0.isGoal, "isRunning": $0.isRunning] }
-        } catch { output["taskError"] = error.localizedDescription }
+        } catch { output["taskError"] = error.localizedDescription } }
         let data = try! JSONSerialization.data(withJSONObject: output, options: [.prettyPrinted, .sortedKeys])
         print(String(data: data, encoding: .utf8)!)
         exit((output["quotaError"] == nil && output["taskError"] == nil) ? 0 : 1)

@@ -39,6 +39,43 @@ public struct QuotaWindow: Identifiable, Equatable, Sendable, Codable {
     }
 }
 
+public struct ResetCredit: Identifiable, Equatable, Sendable, Codable {
+    public let id: String
+    public let status: String
+    public let expiresAt: Date?
+    public let title: String?
+
+    public init(id: String, status: String, expiresAt: Date?, title: String?) {
+        self.id = id
+        self.status = status
+        self.expiresAt = expiresAt
+        self.title = title
+    }
+
+    public var expiryLabel: String {
+        guard let expiresAt else { return "未知" }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = .current
+        formatter.dateFormat = "M/d"
+        return formatter.string(from: expiresAt)
+    }
+}
+
+public struct RateLimitData: Equatable, Sendable {
+    public let windows: [QuotaWindow]
+    public let resetCredits: [ResetCredit]
+    public let resetCreditAvailableCount: Int
+    public let resetCreditDetailsComplete: Bool
+
+    public init(windows: [QuotaWindow], resetCredits: [ResetCredit], resetCreditAvailableCount: Int, resetCreditDetailsComplete: Bool) {
+        self.windows = windows
+        self.resetCredits = resetCredits
+        self.resetCreditAvailableCount = resetCreditAvailableCount
+        self.resetCreditDetailsComplete = resetCreditDetailsComplete
+    }
+}
+
 public struct ActiveTask: Identifiable, Equatable, Sendable, Codable {
     public let id: String
     public let title: String

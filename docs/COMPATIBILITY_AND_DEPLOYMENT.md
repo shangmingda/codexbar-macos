@@ -29,6 +29,8 @@ CodexBar 启动本机 Codex `app-server --stdio` 并调用 `account/rateLimits/r
 
 额度窗口根据 `windowDurationMins` 动态分类。当前只返回周窗口时显示周额度；后端恢复 300 分钟窗口时自动增加 5 小时额度。
 
+重置卡读取同一响应中的 `rateLimitResetCredits`。仅展示 `status=available` 的卡，按真实 `expiresAt` 排序；如果后端只返回卡数但未返回明细，界面保留上次成功结果并自动重试，不用“未知”代替真实日期。
+
 ### 任务
 
 任务列表是以下两类的并集：
@@ -37,6 +39,12 @@ CodexBar 启动本机 Codex `app-server --stdio` 并调用 `account/rateLimits/r
 - `goals_1.sqlite` 中状态为 `active` 的 Goal。
 
 `task_complete` 或 `turn_aborted` 后普通任务自动移出；同一线程同时属于两类时只显示一次。
+
+任务刷新包含三层稳定性保护：
+
+1. SQLite 读取设置 3 秒忙等待，降低 Codex 正在写库时的瞬时失败。
+2. `lsof` 运行态探测失败时自动重试三次，不立即覆盖界面。
+3. 新结果是现有任务的子集时进行二次确认，失败时保留上一次成功任务列表。
 
 ### 自动启动
 
@@ -50,7 +58,7 @@ CodexBar 启动本机 Codex `app-server --stdio` 并调用 `account/rateLimits/r
 | --- | --- | --- |
 | 环境 | `swift --version` | Swift 6 可用 |
 | 编译 | `swift build` | 无 error / warning |
-| 逻辑测试 | `swift run codexbar-selftest` | 全部测试通过 |
+| 逻辑测试 | `swift run codexbar-selftest` | 20 项测试全部通过 |
 | 本机数据 | `swift run codexbar-diagnostics` | 返回额度和任务 JSON |
 | 安装 | `./scripts/install.sh` | 输出 `Installed` |
 | 签名 | `codesign --verify --deep --strict ~/Applications/CodexBar.app` | 退出码 0 |
@@ -64,6 +72,8 @@ CodexBar 启动本机 Codex `app-server --stdio` 并调用 `account/rateLimits/r
 2. 搜索并确认没有 Token、Cookie、API Key、密码或授权头。
 3. 在至少一台非开发机器上执行 clone → install → diagnostics。
 4. Codex Desktop 更新后重点回归：额度读取、普通任务检测、Goal 合并与深链跳转。
+5. 将 Codex 原始 `rateLimitResetCredits` 与诊断输出逐项比较卡 ID、状态和到期时间。
+6. 连续和并发运行 `--tasks-only`，确认没有 `taskError` 或无效 JSON。
 
 ## 已知限制
 

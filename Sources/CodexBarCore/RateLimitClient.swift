@@ -27,7 +27,7 @@ public final class RateLimitClient {
         self.timeout = timeout
     }
 
-    public func fetch() async throws -> [QuotaWindow] {
+    public func fetch() async throws -> RateLimitData {
         guard let executableURL else { throw RateLimitClientError.codexNotFound }
         return try await withCheckedThrowingContinuation { continuation in
             let session = RateLimitRequestSession(continuation: continuation)
@@ -66,7 +66,7 @@ public final class RateLimitClient {
         }
     }
 
-    public static func parseResponse(_ data: Data) -> Result<[QuotaWindow], Error>? {
+    public static func parseResponse(_ data: Data) -> Result<RateLimitData, Error>? {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               (json["id"] as? NSNumber)?.intValue == 2 else { return nil }
         if let error = json["error"] as? [String: Any] {
@@ -98,7 +98,39 @@ public final class RateLimitClient {
         }
 
         let unique = Dictionary(grouping: windows, by: { $0.durationMinutes ?? -1 }).compactMap { $0.value.first }
-        return .success(unique.sorted { ($0.durationMinutes ?? Int.max) < ($1.durationMinutes ?? Int.max) })
+        let sortedWindows = unique.sorted { ($0.durationMinutes ?? Int.max) < ($1.durationMinutes ?? Int.max) }
+
+        let creditSummary = result["rateLimitResetCredits"] as? [String: Any]
+        let availableCount = (creditSummary?["availableCount"] as? NSNumber)?.intValue ?? 0
+        let rawCredits = creditSummary?["credits"] as? [Any] ?? []
+        var credits = rawCredits.compactMap { rawCredit -> ResetCredit? in
+            guard let credit = rawCredit as? [String: Any],
+                  let id = credit["id"] as? String,
+                  let status = credit["status"] as? String,
+                  status == "available" else { return nil }
+            let expirySeconds = (credit["expiresAt"] as? NSNumber)?.doubleValue
+            return ResetCredit(
+                id: id,
+                status: status,
+                expiresAt: expirySeconds.map(Date.init(timeIntervalSince1970:)),
+                title: credit["title"] as? String
+            )
+        }
+        credits.sort {
+            switch ($0.expiresAt, $1.expiresAt) {
+            case let (lhs?, rhs?): return lhs < rhs
+            case (_?, nil): return true
+            case (nil, _?): return false
+            case (nil, nil): return $0.id < $1.id
+            }
+        }
+        let detailsComplete = credits.count == availableCount && credits.allSatisfy { $0.expiresAt != nil }
+        return .success(RateLimitData(
+            windows: sortedWindows,
+            resetCredits: credits,
+            resetCreditAvailableCount: availableCount,
+            resetCreditDetailsComplete: detailsComplete
+        ))
     }
 }
 
@@ -108,13 +140,13 @@ private final class RateLimitRequestSession: @unchecked Sendable {
     let output = Pipe()
     let errors = Pipe()
     let accumulator = LineAccumulator()
-    private let gate: CompletionGate<[QuotaWindow]>
+    private let gate: CompletionGate<RateLimitData>
 
-    init(continuation: CheckedContinuation<[QuotaWindow], Error>) {
+    init(continuation: CheckedContinuation<RateLimitData, Error>) {
         gate = CompletionGate(continuation: continuation)
     }
 
-    func finish(_ result: Result<[QuotaWindow], Error>) {
+    func finish(_ result: Result<RateLimitData, Error>) {
         if gate.finish(result) {
             output.fileHandleForReading.readabilityHandler = nil
             if process.isRunning { process.terminate() }
