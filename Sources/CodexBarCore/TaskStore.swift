@@ -133,13 +133,18 @@ public final class TaskStore {
         guard !appServerPIDs.isEmpty else { return [] }
 
         var paths = Set<String>()
+        var inspectedProcessCount = 0
         for pid in appServerPIDs {
-            let listing = try run(executable: "/usr/sbin/lsof", arguments: ["-Fn", "-p", String(pid)])
+            guard let listing = try? run(executable: "/usr/sbin/lsof", arguments: ["-Fn", "-p", String(pid)]) else { continue }
+            inspectedProcessCount += 1
             for line in listing.split(separator: "\n") {
                 guard line.first == "n" else { continue }
                 let path = String(line.dropFirst())
                 if path.contains("/.codex/sessions/"), path.hasSuffix(".jsonl") { paths.insert(path) }
             }
+        }
+        guard inspectedProcessCount > 0 else {
+            throw TaskStoreError.queryFailed("Codex 运行状态探测瞬时不可用")
         }
 
         var ids = Set<String>()
@@ -198,7 +203,7 @@ public final class TaskStore {
     }
 
     private static func runSQLite(database: URL, sql: String) throws -> Data {
-        try runData(executable: "/usr/bin/sqlite3", arguments: ["-readonly", "-json", database.path, sql])
+        try runData(executable: "/usr/bin/sqlite3", arguments: ["-readonly", "-cmd", ".timeout 3000", "-json", database.path, sql])
     }
 
     private static func run(executable: String, arguments: [String]) throws -> String {

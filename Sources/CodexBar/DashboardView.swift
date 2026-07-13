@@ -9,8 +9,11 @@ struct DashboardView: View {
         VStack(spacing: 0) {
             header
             ScrollView {
-                VStack(spacing: 18) {
+                VStack(spacing: 14) {
                     quotaSection
+                    if !state.resetCredits.isEmpty {
+                        resetCreditSection
+                    }
                     taskSection
                 }
                 .padding(16)
@@ -21,7 +24,12 @@ struct DashboardView: View {
         .background(.ultraThinMaterial)
     }
 
-    private var panelHeight: CGFloat { min(570, 310 + CGFloat(min(state.tasks.count, 4)) * 70) }
+    private var panelHeight: CGFloat {
+        let creditHeight: CGFloat = state.resetCredits.isEmpty ? 0 : 28
+        return min(590, 310 + creditHeight + CGFloat(min(state.tasks.count, 4)) * 70)
+    }
+
+    private var hasSyncError: Bool { state.quotaError != nil || state.taskError != nil }
 
     private var header: some View {
         HStack(spacing: 11) {
@@ -35,8 +43,8 @@ struct DashboardView: View {
             }
             Spacer()
             HStack(spacing: 5) {
-                Circle().fill(state.quotaError == nil ? Color.green : Color.orange).frame(width: 6, height: 6)
-                Text(state.quotaError == nil ? "LIVE" : "DEGRADED")
+                Circle().fill(hasSyncError ? Color.orange : Color.green).frame(width: 6, height: 6)
+                Text(hasSyncError ? "DEGRADED" : "LIVE")
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
@@ -45,6 +53,20 @@ struct DashboardView: View {
         }
         .padding(.horizontal, 16).padding(.vertical, 13)
         .background(Color.primary.opacity(0.035))
+    }
+
+    private var resetCreditSection: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: "ticket")
+                .font(.system(size: 10, weight: .semibold))
+            (Text("重置卡到期：").fontWeight(.semibold) +
+             Text(state.resetCredits.map(\.expiryLabel).joined(separator: "，")))
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var quotaSection: some View {
@@ -82,7 +104,7 @@ struct DashboardView: View {
                 VStack(spacing: 8) {
                     Image(systemName: "checkmark.circle")
                         .font(.system(size: 21, weight: .light)).foregroundStyle(.secondary)
-                    Text(state.taskError ?? "当前没有进行中的目标任务")
+                    Text(state.taskError ?? "当前没有进行中的任务")
                         .font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity).padding(.vertical, 18).background(cardBackground)

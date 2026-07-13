@@ -5,11 +5,13 @@ CodexBar 是一个原生 macOS 菜单栏工具，用于查看当前 Codex 账号
 ## 功能
 
 - 自动读取当前 Codex 账号的真实额度窗口：仅有周额度时显示一行；恢复“5 小时 + 周额度”时自动显示两行。
+- 展示当前账号所有可用重置卡的真实到期日；明细不完整时自动重试，不显示伪造的“未知日期”。
 - 合并统计 Codex 桌面版普通运行任务与 `active` Goal，同一线程只计一次。
 - 点击任务直接通过 `codex://threads/{threadId}` 返回对应 Codex 窗口。
 - Codex 桌面版启动时自动补启动 CodexBar；两者关闭互不影响，且不会重复启动。
 - 不读取或保存 `auth.json`，不要求 API Key，不依赖付费服务。
 - 额度每 60 秒刷新，任务每 15 秒刷新；打开面板时立即刷新任务。
+- 任务和额度获取包含自动重试、SQLite 忙等待与上次成功结果保护，瞬时失败不需要手动刷新恢复。
 
 ## 兼容性
 
@@ -54,6 +56,13 @@ swift run codexbar-diagnostics
 ```
 
 `codexbar-diagnostics` 只输出额度窗口与任务摘要，不输出账号凭据。
+
+也可以单独诊断：
+
+```bash
+swift run codexbar-diagnostics --quota-only
+swift run codexbar-diagnostics --tasks-only
+```
 
 ## 升级
 
