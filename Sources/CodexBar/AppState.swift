@@ -30,6 +30,8 @@ final class AppState: ObservableObject {
     private var taskRefreshInFlight = false
     private var quotaRefreshInFlight = false
     private var budgetRefreshInFlight = false
+    private var warningInFlight = Set<String>()
+    private var lastWarningAttempt: [String: Date] = [:]
     private var interruptInFlight = Set<String>()
     private var lastInterruptAttempt: [String: Date] = [:]
     private var resetCreditAutoUseRecords: [String: ResetCreditAutoUseRecord] = [:]
@@ -266,6 +268,11 @@ final class AppState: ObservableObject {
 
     func clearBudget(for task: ActiveTask) {
         budgets.removeValue(forKey: task.id)
+        if let turnID = task.activeTurnID {
+            let warningKey = budgetWarningKey(threadID: task.id, turnID: turnID)
+            warningInFlight.remove(warningKey)
+            lastWarningAttempt.removeValue(forKey: warningKey)
+        }
         interruptInFlight.remove(task.id)
         lastInterruptAttempt.removeValue(forKey: task.id)
         persistBudgets()
@@ -290,10 +297,18 @@ final class AppState: ObservableObject {
 
     private func evaluateBudgets() {
         for task in tasks {
-            guard var budget = budgets[task.id],
+            guard let budget = budgets[task.id],
                   let turnID = task.activeTurnID,
-                  task.isRunning,
-                  budget.usage(currentTokens: task.tokensUsed).hasReachedLimit,
+                  task.isRunning else { continue }
+
+            let usage = budget.usage(currentTokens: task.tokensUsed)
+            if task.isControllable,
+               usage.needsClosingWarning,
+               budget.lastWarnedTurnID != turnID {
+                sendBudgetClosingWarning(task: task, turnID: turnID, usage: usage)
+            }
+
+            guard usage.hasReachedLimit,
                   budget.lastInterruptedTurnID != turnID,
                   !interruptInFlight.contains(task.id) else { continue }
 
@@ -309,11 +324,12 @@ final class AppState: ObservableObject {
                 defer { interruptInFlight.remove(task.id) }
                 do {
                     try await controlClient.interrupt(threadID: task.id, turnID: turnID)
-                    budget.lastInterruptedTurnID = turnID
-                    budget.lastInterruptedAt = Date()
-                    budgets[task.id] = budget
+                    guard var latestBudget = budgets[task.id] else { return }
+                    latestBudget.lastInterruptedTurnID = turnID
+                    latestBudget.lastInterruptedAt = Date()
+                    budgets[task.id] = latestBudget
                     persistBudgets()
-                    budgetNotice = "“\(shortTitle(task.title))”达到 \(TokenFormatter.compact(budget.limitTokens)) 上限，已自动停止"
+                    budgetNotice = "“\(shortTitle(task.title))”达到 \(TokenFormatter.compact(latestBudget.limitTokens)) 上限，已自动停止"
                     try? await Task.sleep(nanoseconds: 700_000_000)
                     refreshTasks()
                 } catch {
@@ -322,6 +338,37 @@ final class AppState: ObservableObject {
                 }
             }
         }
+    }
+
+    private func sendBudgetClosingWarning(task: ActiveTask, turnID: String, usage: TaskBudgetUsage) {
+        let warningKey = budgetWarningKey(threadID: task.id, turnID: turnID)
+        guard !warningInFlight.contains(warningKey) else { return }
+        if let lastAttempt = lastWarningAttempt[warningKey], Date().timeIntervalSince(lastAttempt) < 15 { return }
+
+        let percent = Int((usage.progress * 100).rounded(.down))
+        let message = "【CodexBar 额度提醒】本任务已使用约 \(TokenFormatter.compact(usage.consumedTokens))/\(TokenFormatter.compact(usage.limitTokens)) Token（\(percent)%），即将达到你设置的上限。请立即收尾并保存当前状态，暂停继续执行；达到上限后 CodexBar 会自动中断本轮任务。"
+        warningInFlight.insert(warningKey)
+        lastWarningAttempt[warningKey] = Date()
+
+        Task {
+            defer { warningInFlight.remove(warningKey) }
+            do {
+                try await controlClient.steer(threadID: task.id, turnID: turnID, text: message)
+                guard var latestBudget = budgets[task.id] else { return }
+                latestBudget.lastWarnedTurnID = turnID
+                latestBudget.lastWarnedAt = Date()
+                budgets[task.id] = latestBudget
+                persistBudgets()
+                budgetNotice = "“\(shortTitle(task.title))”已使用 \(percent)%，已发送收尾提醒"
+            } catch {
+                budgetNotice = "收尾提醒暂未送达；达到上限仍会自动停止"
+                logger.warning("Budget steer failed for \(task.id, privacy: .private): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    private func budgetWarningKey(threadID: String, turnID: String) -> String {
+        "\(threadID):\(turnID)"
     }
 
     func activateAutoStopNow() {

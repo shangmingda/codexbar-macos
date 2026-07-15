@@ -37,7 +37,7 @@ public final class TaskBudgetStore {
     public func save(_ budgets: [String: TaskBudget]) throws {
         let directory = fileURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let envelope = Envelope(version: 1, budgets: budgets.values.sorted { $0.createdAt < $1.createdAt })
+        let envelope = Envelope(version: 2, budgets: budgets.values.sorted { $0.createdAt < $1.createdAt })
         let data = try JSONEncoder.codexBar.encode(envelope)
         try data.write(to: fileURL, options: .atomic)
     }

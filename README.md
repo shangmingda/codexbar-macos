@@ -9,7 +9,7 @@ CodexBar 是一个原生 macOS 菜单栏工具，用于查看当前 Codex 账号
 - 可明确开启“到期前 1 小时自动使用重置卡”；真实兑换、最早到期优先，并用稳定幂等键避免重复消耗。
 - 合并统计 Codex 桌面版普通运行任务与 `active` Goal，同一线程只计一次。
 - 运行秒数取自当前 turn 的真实启动时间，点击跳转、刷新或打开 Codex 不会重新计时。
-- 每个任务可独立设置 25K～5M Token 上限，从设置时的真实累计量开始计算；达到上限后只中断对应任务，不影响其他任务。
+- 每个任务可独立设置 25K～5M Token 上限，从设置时的真实累计量开始计算；使用到 90% 时自动发送收尾提示，达到上限后只中断对应任务，不影响其他任务。
 - 如果安装时 Codex 已在运行，CodexBar 会等所有任务结束后自动完整重启一次 Codex 并启用停止能力；也可在面板确认后立即启用。
 - 点击任务直接通过 `codex://threads/{threadId}` 返回对应 Codex 窗口。
 - Codex 桌面版启动时自动补启动 CodexBar；两者关闭互不影响，且不会重复启动。
@@ -102,7 +102,7 @@ cd codexbar-macos
 - 额度通过当前机器自带的 Codex `app-server` 读取，自动使用 Codex Desktop 当前登录账号。
 - 任务状态通过当前用户的 Codex 本地状态库和桌面主进程当前打开的 rollout 日志只读判断。
 - 单任务用量使用该线程 rollout 中的真实 `total_tokens`；全局周额度百分比不能可靠拆分给并行任务，因此不会用全局百分比伪造单任务用量。
-- 自动停止通过当前 Codex app-server 的 `turn/interrupt(threadId, turnId)` 完成，不会使用 `kill` 终止整个 Codex。
+- 收尾提示通过当前 Codex app-server 的 `turn/steer` 发送，同一任务 turn 只发送一次；自动停止继续通过 `turn/interrupt(threadId, turnId)` 完成，不会使用 `kill` 终止整个 Codex。
 - 重置卡自动使用默认关闭；开启后通过当前 Codex app-server 的 `account/rateLimitResetCredit/consume` 指定真实卡 ID。返回“当前无需重置”时不会消耗该卡，并会继续检查。
 - 所有读取均发生在本机，不上传任务、额度或账号数据。
 - Codex Desktop 协议或本地数据库结构发生大版本变化时，可能需要更新兼容逻辑。

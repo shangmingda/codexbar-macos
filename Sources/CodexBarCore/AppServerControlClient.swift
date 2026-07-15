@@ -18,10 +18,10 @@ public enum AppServerControlError: LocalizedError {
         case .socketPathTooLong: return "Codex 控制通道路径过长"
         case .connectionFailed(let value): return "连接 Codex 控制通道失败：\(value)"
         case .handshakeFailed: return "Codex 控制通道握手失败"
-        case .timeout: return "Codex 中断请求超时"
+        case .timeout: return "Codex 控制请求超时"
         case .connectionClosed: return "Codex 控制通道已关闭"
-        case .malformedResponse: return "Codex 返回了无法识别的中断结果"
-        case .server(let value): return "Codex 拒绝中断任务：\(value)"
+        case .malformedResponse: return "Codex 返回了无法识别的控制结果"
+        case .server(let value): return "Codex 拒绝控制任务：\(value)"
         }
     }
 }
@@ -45,6 +45,18 @@ public final class AppServerControlClient: @unchecked Sendable {
         try await performRequest(
             method: "turn/interrupt",
             params: ["threadId": threadID, "turnId": turnID]
+        )
+    }
+
+    public func steer(threadID: String, turnID: String, text: String) async throws {
+        try await performRequest(
+            method: "turn/steer",
+            params: [
+                "threadId": threadID,
+                "expectedTurnId": turnID,
+                "clientUserMessageId": "codexbar-budget-warning-\(turnID)",
+                "input": [["type": "text", "text": text]]
+            ]
         )
     }
 
@@ -79,7 +91,7 @@ public final class AppServerControlClient: @unchecked Sendable {
             "id": 1,
             "method": "initialize",
             "params": [
-                "clientInfo": ["name": "codexbar", "version": "1.2"],
+                "clientInfo": ["name": "codexbar", "version": "1.3.1"],
                 "capabilities": ["experimentalApi": true]
             ]
         ])
