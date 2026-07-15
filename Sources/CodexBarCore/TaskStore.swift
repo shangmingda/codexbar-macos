@@ -22,6 +22,26 @@ public enum RolloutLifecycleEvent: String, Equatable, Sendable {
     case aborted = "turn_aborted"
 }
 
+public struct RolloutRuntimeSnapshot: Equatable, Sendable {
+    public let lifecycle: RolloutLifecycleEvent?
+    public let activeTurnID: String?
+    public let totalTokens: Int
+
+    public init(lifecycle: RolloutLifecycleEvent?, activeTurnID: String?, totalTokens: Int) {
+        self.lifecycle = lifecycle
+        self.activeTurnID = activeTurnID
+        self.totalTokens = max(0, totalTokens)
+    }
+}
+
+private struct RunningThreadInfo {
+    let threadID: String
+    let turnID: String?
+    let totalTokens: Int
+    let rolloutPath: String
+    let isControllable: Bool
+}
+
 public final class TaskStore {
     private let codexHome: URL
 
@@ -54,7 +74,10 @@ public final class TaskStore {
                 timeUsedSeconds: (row["time_used_seconds"] as? NSNumber)?.intValue ?? 0,
                 updatedAt: Date(timeIntervalSince1970: updatedMs / 1000),
                 isGoal: (row["is_goal"] as? NSNumber)?.boolValue ?? false,
-                isRunning: (row["is_running"] as? NSNumber)?.boolValue ?? false
+                isRunning: (row["is_running"] as? NSNumber)?.boolValue ?? false,
+                activeTurnID: row["turn_id"] as? String,
+                rolloutPath: row["rollout_path"] as? String,
+                isControllable: (row["is_controllable"] as? NSNumber)?.boolValue ?? false
             )
         }
     }
@@ -71,6 +94,56 @@ public final class TaskStore {
         return nil
     }
 
+    public static func runtimeSnapshot(in data: Data) -> RolloutRuntimeSnapshot {
+        var lifecycle: RolloutLifecycleEvent?
+        var turnID: String?
+        var totalTokens = 0
+        for rawLine in data.split(separator: 0x0A).reversed() {
+            guard let json = try? JSONSerialization.jsonObject(with: Data(rawLine)) as? [String: Any],
+                  json["type"] as? String == "event_msg",
+                  let payload = json["payload"] as? [String: Any],
+                  let type = payload["type"] as? String else { continue }
+            if totalTokens == 0, type == "token_count",
+               let info = payload["info"] as? [String: Any],
+               let total = info["total_token_usage"] as? [String: Any] {
+                totalTokens = (total["total_tokens"] as? NSNumber)?.intValue ?? 0
+            }
+            if lifecycle == nil, let event = RolloutLifecycleEvent(rawValue: type) {
+                lifecycle = event
+                if event == .started { turnID = payload["turn_id"] as? String }
+            }
+            if lifecycle != nil, totalTokens > 0 { break }
+        }
+        return RolloutRuntimeSnapshot(
+            lifecycle: lifecycle,
+            activeTurnID: lifecycle == .started ? turnID : nil,
+            totalTokens: totalTokens
+        )
+    }
+
+    public func refreshRuntime(for tasks: [ActiveTask]) async -> [ActiveTask] {
+        await Task.detached(priority: .utility) {
+            tasks.map { task in
+                guard let path = task.rolloutPath,
+                      let snapshot = Self.runtimeSnapshot(inFileAt: URL(fileURLWithPath: path)) else { return task }
+                return ActiveTask(
+                    id: task.id,
+                    title: task.title,
+                    objective: task.objective,
+                    cwd: task.cwd,
+                    tokensUsed: max(task.tokensUsed, snapshot.totalTokens),
+                    timeUsedSeconds: task.timeUsedSeconds,
+                    updatedAt: task.updatedAt,
+                    isGoal: task.isGoal,
+                    isRunning: snapshot.lifecycle == .started,
+                    activeTurnID: snapshot.activeTurnID,
+                    rolloutPath: task.rolloutPath,
+                    isControllable: task.isControllable
+                )
+            }
+        }.value
+    }
+
     private static func fetchSynchronously(codexHome: URL) throws -> [ActiveTask] {
         let goalsDB = database(named: "goals_1.sqlite", in: codexHome)
         let stateDB = database(named: "state_5.sqlite", in: codexHome)
@@ -78,8 +151,8 @@ public final class TaskStore {
         guard FileManager.default.isExecutableFile(atPath: "/usr/bin/sqlite3") else { throw TaskStoreError.sqliteUnavailable }
 
         let goalTasks = try fetchGoalTasks(goalsDB: goalsDB, stateDB: stateDB)
-        let runningIDs = try fetchRunningThreadIDs()
-        let runningTasks = try fetchThreadMetadata(ids: runningIDs, stateDB: stateDB)
+        let runningInfo = try fetchRunningThreadInfo()
+        let runningTasks = try fetchThreadMetadata(info: runningInfo, stateDB: stateDB)
         return merge(goalTasks + runningTasks)
     }
 
@@ -94,8 +167,10 @@ public final class TaskStore {
         ATTACH DATABASE 'file:\(escapedState)?mode=ro' AS state;
         SELECT g.thread_id,
                COALESCE(NULLIF(t.title,''), substr(g.objective,1,instr(g.objective || char(10),char(10))-1)) AS title,
-               g.objective, g.tokens_used, g.time_used_seconds, g.updated_at_ms,
-               COALESCE(t.cwd,'') AS cwd, 1 AS is_goal, 0 AS is_running
+               g.objective, MAX(g.tokens_used, COALESCE(t.tokens_used,0)) AS tokens_used,
+               g.time_used_seconds, g.updated_at_ms,
+               COALESCE(t.cwd,'') AS cwd, 1 AS is_goal, 0 AS is_running,
+               NULL AS turn_id, t.rollout_path AS rollout_path, 0 AS is_controllable
         FROM thread_goals g
         LEFT JOIN state.threads t ON t.id=g.thread_id
         WHERE g.status='active'
@@ -104,65 +179,101 @@ public final class TaskStore {
         return try decodeRows(runSQLite(database: goalsDB, sql: sql))
     }
 
-    private static func fetchThreadMetadata(ids: Set<String>, stateDB: URL) throws -> [ActiveTask] {
-        let safeIDs = ids.filter { $0.range(of: #"^[0-9a-fA-F-]{8,}$"#, options: .regularExpression) != nil }
+    private static func fetchThreadMetadata(info: [String: RunningThreadInfo], stateDB: URL) throws -> [ActiveTask] {
+        let safeIDs = Set(info.keys.filter { $0.range(of: #"^[0-9a-fA-F-]{8,}$"#, options: .regularExpression) != nil })
         guard !safeIDs.isEmpty else { return [] }
         let list = safeIDs.map { "'\($0)'" }.joined(separator: ",")
         let sql = """
         SELECT id AS thread_id,
                COALESCE(NULLIF(title,''), NULLIF(preview,''), '未命名任务') AS title,
                COALESCE(preview,'') AS objective,
-               0 AS tokens_used, 0 AS time_used_seconds,
+               COALESCE(tokens_used,0) AS tokens_used, 0 AS time_used_seconds,
                CASE WHEN updated_at_ms IS NOT NULL THEN updated_at_ms ELSE updated_at * 1000 END AS updated_at_ms,
-               COALESCE(cwd,'') AS cwd, 0 AS is_goal, 1 AS is_running
+               COALESCE(cwd,'') AS cwd, 0 AS is_goal, 1 AS is_running,
+               NULL AS turn_id, rollout_path AS rollout_path, 0 AS is_controllable
         FROM threads WHERE id IN (\(list));
         """
-        return try decodeRows(runSQLite(database: stateDB, sql: sql))
+        return try decodeRows(runSQLite(database: stateDB, sql: sql)).map { task in
+            guard let runtime = info[task.id] else { return task }
+            return ActiveTask(
+                id: task.id,
+                title: task.title,
+                objective: task.objective,
+                cwd: task.cwd,
+                tokensUsed: max(task.tokensUsed, runtime.totalTokens),
+                timeUsedSeconds: task.timeUsedSeconds,
+                updatedAt: task.updatedAt,
+                isGoal: task.isGoal,
+                isRunning: true,
+                activeTurnID: runtime.turnID,
+                rolloutPath: runtime.rolloutPath,
+                isControllable: runtime.isControllable
+            )
+        }
     }
 
-    private static func fetchRunningThreadIDs() throws -> Set<String> {
-        guard FileManager.default.isExecutableFile(atPath: "/usr/sbin/lsof") else { return [] }
+    private static func fetchRunningThreadInfo() throws -> [String: RunningThreadInfo] {
+        guard FileManager.default.isExecutableFile(atPath: "/usr/sbin/lsof") else { return [:] }
         let ps = try run(executable: "/bin/ps", arguments: ["-axo", "pid=,args="])
-        let appServerPIDs = ps.split(separator: "\n").compactMap { line -> Int? in
+        let appServers = ps.split(separator: "\n").compactMap { line -> (pid: Int, controllable: Bool)? in
             let value = String(line)
-            guard value.contains("/Contents/Resources/codex"),
-                  value.contains(" app-server"),
-                  value.contains("--analytics-default-enabled") else { return nil }
-            return Int(value.trimmingCharacters(in: .whitespaces).split(separator: " ", maxSplits: 1).first ?? "")
+            guard value.contains("/Contents/Resources/codex") || value.contains("/Application Support/CodexBar/codex-control"),
+                  value.contains(" app-server") else { return nil }
+            let isDesktopServer = value.contains("--analytics-default-enabled")
+            let isSharedServer = value.contains("--listen unix://")
+            guard isDesktopServer || isSharedServer else { return nil }
+            guard let pid = Int(value.trimmingCharacters(in: .whitespaces).split(separator: " ", maxSplits: 1).first ?? "") else { return nil }
+            return (pid, isSharedServer)
         }
-        guard !appServerPIDs.isEmpty else { return [] }
+        guard !appServers.isEmpty else { return [:] }
 
-        var paths = Set<String>()
+        var paths: [String: Bool] = [:]
         var inspectedProcessCount = 0
-        for pid in appServerPIDs {
-            guard let listing = try? run(executable: "/usr/sbin/lsof", arguments: ["-Fn", "-p", String(pid)]) else { continue }
+        for server in appServers {
+            guard let listing = try? run(executable: "/usr/sbin/lsof", arguments: ["-Fn", "-p", String(server.pid)]) else { continue }
             inspectedProcessCount += 1
             for line in listing.split(separator: "\n") {
                 guard line.first == "n" else { continue }
                 let path = String(line.dropFirst())
-                if path.contains("/.codex/sessions/"), path.hasSuffix(".jsonl") { paths.insert(path) }
+                if path.contains("/.codex/sessions/"), path.hasSuffix(".jsonl") {
+                    paths[path] = (paths[path] ?? false) || server.controllable
+                }
             }
         }
         guard inspectedProcessCount > 0 else {
             throw TaskStoreError.queryFailed("Codex 运行状态探测瞬时不可用")
         }
 
-        var ids = Set<String>()
-        for path in paths where latestLifecycleEvent(inFileAt: URL(fileURLWithPath: path)) == .started {
+        var result: [String: RunningThreadInfo] = [:]
+        for (path, controllable) in paths {
+            guard let snapshot = runtimeSnapshot(inFileAt: URL(fileURLWithPath: path)), snapshot.lifecycle == .started else { continue }
             let name = URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
             guard let id = name.split(separator: "-").suffix(5).joined(separator: "-").nilIfEmpty else { continue }
-            ids.insert(id)
+            result[id] = RunningThreadInfo(
+                threadID: id,
+                turnID: snapshot.activeTurnID,
+                totalTokens: snapshot.totalTokens,
+                rolloutPath: path,
+                isControllable: controllable
+            )
         }
-        return ids
+        return result
     }
 
     private static func latestLifecycleEvent(inFileAt url: URL) -> RolloutLifecycleEvent? {
+        runtimeSnapshot(inFileAt: url)?.lifecycle
+    }
+
+    private static func runtimeSnapshot(inFileAt url: URL) -> RolloutRuntimeSnapshot? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         let size = (try? handle.seekToEnd()) ?? 0
         let chunkSize: UInt64 = 512 * 1024
         var end = size
         var carry = Data()
+        var lifecycle: RolloutLifecycleEvent?
+        var turnID: String?
+        var totalTokens = 0
 
         while end > 0 {
             let start = end > chunkSize ? end - chunkSize : 0
@@ -172,12 +283,32 @@ public final class TaskStore {
             let parts = chunk.split(separator: 0x0A, omittingEmptySubsequences: true)
             let complete = start > 0 ? parts.dropFirst() : parts[...]
             for rawLine in complete.reversed() {
-                if let event = latestLifecycleEvent(in: Data(rawLine)) { return event }
+                guard let json = try? JSONSerialization.jsonObject(with: Data(rawLine)) as? [String: Any],
+                      json["type"] as? String == "event_msg",
+                      let payload = json["payload"] as? [String: Any],
+                      let type = payload["type"] as? String else { continue }
+                if totalTokens == 0, type == "token_count",
+                   let info = payload["info"] as? [String: Any],
+                   let total = info["total_token_usage"] as? [String: Any] {
+                    totalTokens = (total["total_tokens"] as? NSNumber)?.intValue ?? 0
+                }
+                if lifecycle == nil, let event = RolloutLifecycleEvent(rawValue: type) {
+                    lifecycle = event
+                    if event == .started { turnID = payload["turn_id"] as? String }
+                }
+                if lifecycle != nil, totalTokens > 0 {
+                    return RolloutRuntimeSnapshot(lifecycle: lifecycle, activeTurnID: lifecycle == .started ? turnID : nil, totalTokens: totalTokens)
+                }
             }
             carry = start > 0 ? Data(parts.first ?? Data.SubSequence()) : Data()
             end = start
         }
-        return carry.isEmpty ? nil : latestLifecycleEvent(in: carry)
+        if !carry.isEmpty {
+            let snapshot = runtimeSnapshot(in: carry)
+            if lifecycle == nil { lifecycle = snapshot.lifecycle; turnID = snapshot.activeTurnID }
+            if totalTokens == 0 { totalTokens = snapshot.totalTokens }
+        }
+        return RolloutRuntimeSnapshot(lifecycle: lifecycle, activeTurnID: lifecycle == .started ? turnID : nil, totalTokens: totalTokens)
     }
 
     private static func merge(_ tasks: [ActiveTask]) -> [ActiveTask] {
@@ -196,7 +327,10 @@ public final class TaskStore {
                 timeUsedSeconds: max(existing.timeUsedSeconds, task.timeUsedSeconds),
                 updatedAt: max(existing.updatedAt, task.updatedAt),
                 isGoal: existing.isGoal || task.isGoal,
-                isRunning: existing.isRunning || task.isRunning
+                isRunning: existing.isRunning || task.isRunning,
+                activeTurnID: existing.activeTurnID ?? task.activeTurnID,
+                rolloutPath: existing.rolloutPath ?? task.rolloutPath,
+                isControllable: existing.isControllable || task.isControllable
             )
         }
         return result.values.sorted { $0.updatedAt > $1.updatedAt }
