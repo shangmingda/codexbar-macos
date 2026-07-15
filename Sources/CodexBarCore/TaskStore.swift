@@ -26,11 +26,13 @@ public struct RolloutRuntimeSnapshot: Equatable, Sendable {
     public let lifecycle: RolloutLifecycleEvent?
     public let activeTurnID: String?
     public let totalTokens: Int
+    public let startedAt: Date?
 
-    public init(lifecycle: RolloutLifecycleEvent?, activeTurnID: String?, totalTokens: Int) {
+    public init(lifecycle: RolloutLifecycleEvent?, activeTurnID: String?, totalTokens: Int, startedAt: Date? = nil) {
         self.lifecycle = lifecycle
         self.activeTurnID = activeTurnID
         self.totalTokens = max(0, totalTokens)
+        self.startedAt = startedAt
     }
 }
 
@@ -38,6 +40,7 @@ private struct RunningThreadInfo {
     let threadID: String
     let turnID: String?
     let totalTokens: Int
+    let startedAt: Date?
     let rolloutPath: String
     let isControllable: Bool
 }
@@ -97,6 +100,7 @@ public final class TaskStore {
     public static func runtimeSnapshot(in data: Data) -> RolloutRuntimeSnapshot {
         var lifecycle: RolloutLifecycleEvent?
         var turnID: String?
+        var startedAt: Date?
         var totalTokens = 0
         for rawLine in data.split(separator: 0x0A).reversed() {
             guard let json = try? JSONSerialization.jsonObject(with: Data(rawLine)) as? [String: Any],
@@ -110,14 +114,18 @@ public final class TaskStore {
             }
             if lifecycle == nil, let event = RolloutLifecycleEvent(rawValue: type) {
                 lifecycle = event
-                if event == .started { turnID = payload["turn_id"] as? String }
+                if event == .started {
+                    turnID = payload["turn_id"] as? String
+                    startedAt = (payload["started_at"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) }
+                }
             }
             if lifecycle != nil, totalTokens > 0 { break }
         }
         return RolloutRuntimeSnapshot(
             lifecycle: lifecycle,
             activeTurnID: lifecycle == .started ? turnID : nil,
-            totalTokens: totalTokens
+            totalTokens: totalTokens,
+            startedAt: lifecycle == .started ? startedAt : nil
         )
     }
 
@@ -134,6 +142,7 @@ public final class TaskStore {
                     tokensUsed: max(task.tokensUsed, snapshot.totalTokens),
                     timeUsedSeconds: task.timeUsedSeconds,
                     updatedAt: task.updatedAt,
+                    runStartedAt: snapshot.startedAt ?? task.runStartedAt,
                     isGoal: task.isGoal,
                     isRunning: snapshot.lifecycle == .started,
                     activeTurnID: snapshot.activeTurnID,
@@ -203,6 +212,7 @@ public final class TaskStore {
                 tokensUsed: max(task.tokensUsed, runtime.totalTokens),
                 timeUsedSeconds: task.timeUsedSeconds,
                 updatedAt: task.updatedAt,
+                runStartedAt: runtime.startedAt,
                 isGoal: task.isGoal,
                 isRunning: true,
                 activeTurnID: runtime.turnID,
@@ -253,6 +263,7 @@ public final class TaskStore {
                 threadID: id,
                 turnID: snapshot.activeTurnID,
                 totalTokens: snapshot.totalTokens,
+                startedAt: snapshot.startedAt,
                 rolloutPath: path,
                 isControllable: controllable
             )
@@ -273,6 +284,7 @@ public final class TaskStore {
         var carry = Data()
         var lifecycle: RolloutLifecycleEvent?
         var turnID: String?
+        var startedAt: Date?
         var totalTokens = 0
 
         while end > 0 {
@@ -294,10 +306,18 @@ public final class TaskStore {
                 }
                 if lifecycle == nil, let event = RolloutLifecycleEvent(rawValue: type) {
                     lifecycle = event
-                    if event == .started { turnID = payload["turn_id"] as? String }
+                    if event == .started {
+                        turnID = payload["turn_id"] as? String
+                        startedAt = (payload["started_at"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) }
+                    }
                 }
                 if lifecycle != nil, totalTokens > 0 {
-                    return RolloutRuntimeSnapshot(lifecycle: lifecycle, activeTurnID: lifecycle == .started ? turnID : nil, totalTokens: totalTokens)
+                    return RolloutRuntimeSnapshot(
+                        lifecycle: lifecycle,
+                        activeTurnID: lifecycle == .started ? turnID : nil,
+                        totalTokens: totalTokens,
+                        startedAt: lifecycle == .started ? startedAt : nil
+                    )
                 }
             }
             carry = start > 0 ? Data(parts.first ?? Data.SubSequence()) : Data()
@@ -305,10 +325,19 @@ public final class TaskStore {
         }
         if !carry.isEmpty {
             let snapshot = runtimeSnapshot(in: carry)
-            if lifecycle == nil { lifecycle = snapshot.lifecycle; turnID = snapshot.activeTurnID }
+            if lifecycle == nil {
+                lifecycle = snapshot.lifecycle
+                turnID = snapshot.activeTurnID
+                startedAt = snapshot.startedAt
+            }
             if totalTokens == 0 { totalTokens = snapshot.totalTokens }
         }
-        return RolloutRuntimeSnapshot(lifecycle: lifecycle, activeTurnID: lifecycle == .started ? turnID : nil, totalTokens: totalTokens)
+        return RolloutRuntimeSnapshot(
+            lifecycle: lifecycle,
+            activeTurnID: lifecycle == .started ? turnID : nil,
+            totalTokens: totalTokens,
+            startedAt: lifecycle == .started ? startedAt : nil
+        )
     }
 
     private static func merge(_ tasks: [ActiveTask]) -> [ActiveTask] {
@@ -326,6 +355,7 @@ public final class TaskStore {
                 tokensUsed: max(existing.tokensUsed, task.tokensUsed),
                 timeUsedSeconds: max(existing.timeUsedSeconds, task.timeUsedSeconds),
                 updatedAt: max(existing.updatedAt, task.updatedAt),
+                runStartedAt: existing.runStartedAt ?? task.runStartedAt,
                 isGoal: existing.isGoal || task.isGoal,
                 isRunning: existing.isRunning || task.isRunning,
                 activeTurnID: existing.activeTurnID ?? task.activeTurnID,
@@ -333,7 +363,9 @@ public final class TaskStore {
                 isControllable: existing.isControllable || task.isControllable
             )
         }
-        return result.values.sorted { $0.updatedAt > $1.updatedAt }
+        return result.values.sorted {
+            ($0.runStartedAt ?? $0.updatedAt) > ($1.runStartedAt ?? $1.updatedAt)
+        }
     }
 
     private static func runSQLite(database: URL, sql: String) throws -> Data {

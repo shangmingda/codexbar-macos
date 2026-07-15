@@ -84,6 +84,7 @@ public struct ActiveTask: Identifiable, Equatable, Sendable, Codable {
     public let tokensUsed: Int
     public let timeUsedSeconds: Int
     public let updatedAt: Date
+    public let runStartedAt: Date?
     public let isGoal: Bool
     public let isRunning: Bool
     public let activeTurnID: String?
@@ -98,6 +99,7 @@ public struct ActiveTask: Identifiable, Equatable, Sendable, Codable {
         tokensUsed: Int,
         timeUsedSeconds: Int,
         updatedAt: Date,
+        runStartedAt: Date? = nil,
         isGoal: Bool = false,
         isRunning: Bool = false,
         activeTurnID: String? = nil,
@@ -111,6 +113,7 @@ public struct ActiveTask: Identifiable, Equatable, Sendable, Codable {
         self.tokensUsed = tokensUsed
         self.timeUsedSeconds = timeUsedSeconds
         self.updatedAt = updatedAt
+        self.runStartedAt = runStartedAt
         self.isGoal = isGoal
         self.isRunning = isRunning
         self.activeTurnID = activeTurnID
@@ -124,6 +127,7 @@ public struct ActiveTask: Identifiable, Equatable, Sendable, Codable {
     }
 
     public var deepLink: URL? { URL(string: "codex://threads/\(id)") }
+    public var elapsedReferenceDate: Date { runStartedAt ?? updatedAt }
 }
 
 public struct TaskBudget: Equatable, Sendable, Codable {

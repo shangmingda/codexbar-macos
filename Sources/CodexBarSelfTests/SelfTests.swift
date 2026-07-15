@@ -39,7 +39,7 @@ struct SelfTests {
         try check(tasks[0].deepLink?.absoluteString == "codex://threads/abc", "任务深链")
         try check(tasks[0].isGoal && tasks[0].isRunning, "Goal 与普通运行状态可同时标记")
 
-        let startedLine = #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}"#
+        let startedLine = #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1","started_at":1784106317}}"#
         let tokenLine = #"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":42000}}}}"#
         let completedLine = #"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}"#
         try check(TaskStore.latestLifecycleEvent(in: Data((startedLine + "\n").utf8)) == .started, "普通任务开始事件识别")
@@ -47,6 +47,12 @@ struct SelfTests {
         let runtime = TaskStore.runtimeSnapshot(in: Data((startedLine + "\n" + tokenLine + "\n").utf8))
         try check(runtime.lifecycle == .started && runtime.activeTurnID == "turn-1", "运行任务 turn ID 识别")
         try check(runtime.totalTokens == 42_000, "运行任务真实 Token 累计识别")
+        try check(runtime.startedAt == Date(timeIntervalSince1970: 1_784_106_317), "任务真实开始时间识别")
+
+        let stableStart = Date(timeIntervalSince1970: 1_784_106_317)
+        let beforeOpen = ActiveTask(id: "stable", title: "稳定计时", objective: "", cwd: "/tmp", tokensUsed: 1, timeUsedSeconds: 1, updatedAt: Date(timeIntervalSince1970: 1_784_106_400), runStartedAt: stableStart, isRunning: true)
+        let afterOpen = ActiveTask(id: "stable", title: "稳定计时", objective: "", cwd: "/tmp", tokensUsed: 1, timeUsedSeconds: 1, updatedAt: Date(timeIntervalSince1970: 1_784_106_900), runStartedAt: stableStart, isRunning: true)
+        try check(beforeOpen.elapsedReferenceDate == afterOpen.elapsedReferenceDate, "点击导致 updatedAt 变化时运行秒数不重置")
 
         let budget = TaskBudget(threadID: "abc", limitTokens: 50_000, baselineTokens: 12_000)
         try check(budget.usage(currentTokens: 42_000).consumedTokens == 30_000, "额度从设置时基线开始计算")
