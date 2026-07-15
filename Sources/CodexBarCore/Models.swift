@@ -162,6 +162,16 @@ public struct TaskBudget: Equatable, Sendable, Codable {
     }
 }
 
+public enum AutoStopActivationPolicy {
+    public static func shouldSchedule(hasBudgets: Bool, tasks: [ActiveTask]) -> Bool {
+        hasBudgets && tasks.contains { !$0.isControllable }
+    }
+
+    public static func shouldRestartWhenIdle(isPending: Bool, tasks: [ActiveTask]) -> Bool {
+        isPending && tasks.isEmpty
+    }
+}
+
 public struct TaskBudgetUsage: Equatable, Sendable {
     public let consumedTokens: Int
     public let limitTokens: Int

@@ -15,6 +15,8 @@ final class AppState: ObservableObject {
     @Published private(set) var quotaError: String?
     @Published private(set) var taskError: String?
     @Published private(set) var lastUpdated: Date?
+    @Published private(set) var autoStopActivationPending = false
+    @Published private(set) var controlRestartInFlight = false
 
     private let rateClient = RateLimitClient()
     private let taskStore = TaskStore()
@@ -27,11 +29,14 @@ final class AppState: ObservableObject {
     private var budgetRefreshInFlight = false
     private var interruptInFlight = Set<String>()
     private var lastInterruptAttempt: [String: Date] = [:]
+    private let activationPendingKey = "CodexBarAutoStopActivationPending"
     private let logger = Logger(subsystem: "com.smd.codexbar", category: "refresh")
 
     var statusLines: [String] { StatusTitleFormatter.lines(windows: quotas, taskCount: tasks.count) }
+    var canActivateAutoStopNow: Bool { autoStopActivationPending && !controlRestartInFlight }
 
     init() {
+        autoStopActivationPending = UserDefaults.standard.bool(forKey: activationPendingKey)
         do {
             budgets = try budgetStore.load()
         } catch {
@@ -84,7 +89,9 @@ final class AppState: ObservableObject {
                     tasks = value
                     taskError = nil
                     lastUpdated = Date()
+                    updateAutoStopActivationState()
                     evaluateBudgets()
+                    activateAutoStopWhenIdle()
                     return
                 } catch {
                     finalError = error
@@ -164,9 +171,12 @@ final class AppState: ObservableObject {
             baselineTokens: task.tokensUsed
         )
         persistBudgets()
-        budgetNotice = task.isControllable
-            ? "已为“\(shortTitle(task.title))”设置 \(TokenFormatter.compact(limitTokens)) Token 上限"
-            : "上限已保存；请重启一次 Codex Desktop 以启用自动停止"
+        if task.isControllable {
+            budgetNotice = "已为“\(shortTitle(task.title))”设置 \(TokenFormatter.compact(limitTokens)) Token 上限"
+        } else {
+            scheduleAutoStopActivation()
+            budgetNotice = "上限已保存；任务全部结束后将自动重启 Codex 并启用自动停止"
+        }
         evaluateBudgets()
     }
 
@@ -175,6 +185,7 @@ final class AppState: ObservableObject {
         interruptInFlight.remove(task.id)
         lastInterruptAttempt.removeValue(forKey: task.id)
         persistBudgets()
+        if budgets.isEmpty { clearAutoStopActivationPending() }
         budgetNotice = "已取消“\(shortTitle(task.title))”的 Token 上限"
     }
 
@@ -188,6 +199,7 @@ final class AppState: ObservableObject {
             let byID = Dictionary(uniqueKeysWithValues: refreshed.map { ($0.id, $0) })
             tasks = tasks.map { byID[$0.id] ?? $0 }
             budgetRefreshInFlight = false
+            updateAutoStopActivationState()
             evaluateBudgets()
         }
     }
@@ -202,7 +214,8 @@ final class AppState: ObservableObject {
                   !interruptInFlight.contains(task.id) else { continue }
 
             guard task.isControllable else {
-                budgetNotice = "“\(shortTitle(task.title))”已达到上限；重启 Codex 后才能自动停止"
+                scheduleAutoStopActivation()
+                budgetNotice = "“\(shortTitle(task.title))”已超限；当前任务无法迁移，任务结束后将自动启用停止能力"
                 continue
             }
             if let lastAttempt = lastInterruptAttempt[task.id], Date().timeIntervalSince(lastAttempt) < 8 { continue }
@@ -222,6 +235,89 @@ final class AppState: ObservableObject {
                 } catch {
                     budgetNotice = "自动停止失败，正在重试：\(error.localizedDescription)"
                     logger.error("Budget interrupt failed for \(task.id, privacy: .private): \(error.localizedDescription, privacy: .public)")
+                }
+            }
+        }
+    }
+
+    func activateAutoStopNow() {
+        scheduleAutoStopActivation()
+        restartCodexForAutoStop()
+    }
+
+    private func updateAutoStopActivationState() {
+        if AutoStopActivationPolicy.shouldSchedule(hasBudgets: !budgets.isEmpty, tasks: tasks) {
+            scheduleAutoStopActivation()
+            if budgetNotice == nil {
+                budgetNotice = "自动停止待启用；所有任务结束后将自动重启 Codex"
+            }
+        } else if autoStopActivationPending, !tasks.isEmpty, tasks.allSatisfy(\.isControllable) {
+            clearAutoStopActivationPending()
+            budgetNotice = "自动停止已启用；任务达到上限后会自动中断"
+        }
+    }
+
+    private func scheduleAutoStopActivation() {
+        autoStopActivationPending = true
+        UserDefaults.standard.set(true, forKey: activationPendingKey)
+    }
+
+    private func clearAutoStopActivationPending() {
+        autoStopActivationPending = false
+        UserDefaults.standard.removeObject(forKey: activationPendingKey)
+    }
+
+    private func activateAutoStopWhenIdle() {
+        guard AutoStopActivationPolicy.shouldRestartWhenIdle(
+            isPending: autoStopActivationPending,
+            tasks: tasks
+        ) else { return }
+        restartCodexForAutoStop()
+    }
+
+    private func restartCodexForAutoStop() {
+        guard !controlRestartInFlight else { return }
+        controlRestartInFlight = true
+
+        let running = NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex")
+        guard !running.isEmpty else {
+            clearAutoStopActivationPending()
+            controlRestartInFlight = false
+            budgetNotice = "自动停止已就绪，下次打开 Codex 后生效"
+            return
+        }
+
+        budgetNotice = "正在完整重启 Codex，以启用单任务自动停止…"
+        running.forEach { _ = $0.terminate() }
+        Task { @MainActor in
+            for _ in 0..<24 {
+                if NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex").isEmpty { break }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            guard NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex").isEmpty else {
+                controlRestartInFlight = false
+                budgetNotice = "Codex 未能自动退出，请按 ⌘Q 完整退出后重新打开"
+                return
+            }
+            guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.openai.codex") else {
+                controlRestartInFlight = false
+                budgetNotice = "未找到 Codex Desktop，无法启用自动停止"
+                return
+            }
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = false
+            NSWorkspace.shared.openApplication(at: url, configuration: configuration) { [weak self] _, error in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.controlRestartInFlight = false
+                    if let error {
+                        self.budgetNotice = "Codex 重新打开失败：\(error.localizedDescription)"
+                    } else {
+                        self.clearAutoStopActivationPending()
+                        self.budgetNotice = "自动停止已启用；新任务达到上限后会自动中断"
+                        try? await Task.sleep(nanoseconds: 1_500_000_000)
+                        self.refreshTasks()
+                    }
                 }
             }
         }

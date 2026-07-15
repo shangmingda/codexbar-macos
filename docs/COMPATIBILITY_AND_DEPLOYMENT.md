@@ -64,7 +64,7 @@ CodexBar 启动本机 Codex `app-server --stdio` 并调用 `account/rateLimits/r
 5. 中断请求同时携带线程 ID 与当前 turn ID，只停止目标任务；不会终止 Codex Desktop 或其他任务。
 6. 配置保存在 `~/Library/Application Support/CodexBar/task-budgets.json`，重启后仍有效。
 
-安装脚本会执行 `launchctl setenv CODEX_APP_SERVER_USE_LOCAL_DAEMON 1`。如果安装时 Codex Desktop 已运行，需要在当前任务完成后重启一次 Codex；重启前界面允许保存上限，但会明确显示控制通道尚未接管，不会声称已经能够自动停止。
+安装脚本会执行 `launchctl setenv CODEX_APP_SERVER_USE_LOCAL_DAEMON 1`。如果安装时 Codex Desktop 已运行，旧 `stdio` 进程中的任务不能被共享服务跨进程接管。CodexBar 会持久记录待启用状态，在所有任务结束后自动完整重启一次 Codex；用户也可点击“立即启用”，确认会中断当前所有任务后立刻重启。重启后新任务由共享服务承载，达到阈值时会自动停止。
 
 ## 部署清单
 
@@ -72,7 +72,7 @@ CodexBar 启动本机 Codex `app-server --stdio` 并调用 `account/rateLimits/r
 | --- | --- | --- |
 | 环境 | `swift --version` | Swift 6 可用 |
 | 编译 | `swift build` | 无 error / warning |
-| 逻辑测试 | `swift run codexbar-selftest` | 28 项测试全部通过 |
+| 逻辑测试 | `swift run codexbar-selftest` | 32 项测试全部通过 |
 | 本机数据 | `swift run codexbar-diagnostics` | 返回额度和任务 JSON |
 | 安装 | `./scripts/install.sh` | 输出 `Installed` |
 | 签名 | `codesign --verify --deep --strict ~/Applications/CodexBar.app` | 退出码 0 |

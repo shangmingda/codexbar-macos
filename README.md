@@ -9,6 +9,7 @@ CodexBar 是一个原生 macOS 菜单栏工具，用于查看当前 Codex 账号
 - 合并统计 Codex 桌面版普通运行任务与 `active` Goal，同一线程只计一次。
 - 运行秒数取自当前 turn 的真实启动时间，点击跳转、刷新或打开 Codex 不会重新计时。
 - 每个任务可独立设置 25K～5M Token 上限，从设置时的真实累计量开始计算；达到上限后只中断对应任务，不影响其他任务。
+- 如果安装时 Codex 已在运行，CodexBar 会等所有任务结束后自动完整重启一次 Codex 并启用停止能力；也可在面板确认后立即启用。
 - 点击任务直接通过 `codex://threads/{threadId}` 返回对应 Codex 窗口。
 - Codex 桌面版启动时自动补启动 CodexBar；两者关闭互不影响，且不会重复启动。
 - 不读取或保存 `auth.json`，不要求 API Key，不依赖付费服务。
@@ -50,7 +51,7 @@ cd codexbar-macos
 4. 安装轻量监听器，在 Codex Desktop 启动时补启动 CodexBar。
 5. 启用 Codex 官方共享 app-server 控制通道，用于精确中断达到上限的单个 turn。
 
-首次升级到 1.2.0 时，如果 Codex Desktop 已经打开，请先完成当前任务，再重启一次 Codex Desktop。之后新任务才能被 CodexBar 精确自动停止；界面在控制通道尚未生效时也会明确提示，不会误杀整个 Codex 进程。
+如果安装时 Codex Desktop 已经打开，正在运行的旧任务不能迁移到共享控制服务。CodexBar 会等待所有任务结束后自动完整重启一次 Codex；之后新任务达到上限时会被精确停止。也可以点击面板中的“立即启用”，确认中断当前所有任务后立刻完成重启。
 
 ## 验证
 
