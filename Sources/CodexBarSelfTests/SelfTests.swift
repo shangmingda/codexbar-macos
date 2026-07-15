@@ -22,6 +22,27 @@ struct SelfTests {
         try check(weekly.resetCreditDetailsComplete, "重置卡明细完整性识别")
         try check(weekly.resetCredits.map(\.id) == ["card-early", "card-late", "card-last"], "重置卡按真实到期时间排序并过滤已使用卡")
 
+        let consumeReset = try unwrap(RateLimitClient.parseConsumeResponse(Data(#"{"id":2,"result":{"outcome":"reset"}}"#.utf8))?.get(), "consume reset parse")
+        let consumeNothing = try unwrap(RateLimitClient.parseConsumeResponse(Data(#"{"id":2,"result":{"outcome":"nothingToReset"}}"#.utf8))?.get(), "consume nothing parse")
+        let consumeNoCredit = try unwrap(RateLimitClient.parseConsumeResponse(Data(#"{"id":2,"result":{"outcome":"noCredit"}}"#.utf8))?.get(), "consume no credit parse")
+        let consumeRedeemed = try unwrap(RateLimitClient.parseConsumeResponse(Data(#"{"id":2,"result":{"outcome":"alreadyRedeemed"}}"#.utf8))?.get(), "consume redeemed parse")
+        try check(consumeReset == .reset, "重置卡真实使用结果解析")
+        try check(consumeNothing == .nothingToReset, "当前无需重置结果解析")
+        try check(consumeNoCredit == .noCredit, "没有可用重置卡结果解析")
+        try check(consumeRedeemed == .alreadyRedeemed, "幂等重复兑换结果解析")
+
+        let autoUseNow = Date(timeIntervalSince1970: 1_784_100_000)
+        let dueLater = ResetCredit(id: "later", status: "available", expiresAt: autoUseNow.addingTimeInterval(3_601), title: nil)
+        let dueSoon = ResetCredit(id: "soon", status: "available", expiresAt: autoUseNow.addingTimeInterval(3_600), title: nil)
+        let dueSooner = ResetCredit(id: "sooner", status: "available", expiresAt: autoUseNow.addingTimeInterval(1_800), title: nil)
+        try check(ResetCreditAutoUsePolicy.nextEligibleCredit(from: [dueLater], records: [:], now: autoUseNow) == nil, "到期前超过一小时不使用重置卡")
+        try check(ResetCreditAutoUsePolicy.nextEligibleCredit(from: [dueSoon], records: [:], now: autoUseNow)?.id == "soon", "到期前一小时进入自动使用窗口")
+        try check(ResetCreditAutoUsePolicy.nextEligibleCredit(from: [dueSoon, dueSooner], records: [:], now: autoUseNow)?.id == "sooner", "多张卡优先使用最早到期卡")
+        let throttledRecord = ResetCreditAutoUseRecord(creditID: "soon", idempotencyKey: "stable-key", lastAttemptAt: autoUseNow.addingTimeInterval(-30))
+        try check(ResetCreditAutoUsePolicy.nextEligibleCredit(from: [dueSoon], records: ["soon": throttledRecord], now: autoUseNow) == nil, "一分钟内不重复请求兑换")
+        let completedRecord = ResetCreditAutoUseRecord(creditID: "soon", idempotencyKey: "stable-key", completedAt: autoUseNow, outcome: .reset)
+        try check(ResetCreditAutoUsePolicy.nextEligibleCredit(from: [dueSoon], records: ["soon": completedRecord], now: autoUseNow) == nil, "已使用卡不会重复兑换")
+
         let sparseCreditData = Data(#"{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":7,"windowDurationMins":10080}},"rateLimitResetCredits":{"availableCount":3,"credits":null}}}"#.utf8)
         let sparseCredits = try unwrap(RateLimitClient.parseResponse(sparseCreditData)?.get(), "sparse credit parse")
         try check(sparseCredits.resetCredits.isEmpty && !sparseCredits.resetCreditDetailsComplete, "卡数存在但明细缺失时不伪造未知日期")
@@ -77,6 +98,14 @@ struct SelfTests {
             "任务额度配置重启后可恢复"
         )
         try? FileManager.default.removeItem(at: budgetURL)
+
+        let resetRecordURL = FileManager.default.temporaryDirectory.appendingPathComponent("codexbar-reset-credit-test-\(UUID().uuidString).json")
+        let resetRecordStore = ResetCreditAutoUseStore(fileURL: resetRecordURL)
+        let resetRecord = ResetCreditAutoUseRecord(creditID: "card-1", idempotencyKey: "fixed-key", lastAttemptAt: autoUseNow)
+        try resetRecordStore.save([resetRecord.creditID: resetRecord])
+        let restoredResetRecord = try resetRecordStore.load()[resetRecord.creditID]
+        try check(restoredResetRecord?.idempotencyKey == "fixed-key" && restoredResetRecord?.lastAttemptAt == autoUseNow, "重置卡幂等键和尝试时间可恢复")
+        try? FileManager.default.removeItem(at: resetRecordURL)
         try check(LaunchCompanionPolicy.shouldLaunchCodexBar(codexIsRunning: true, codexBarIsRunning: false), "Codex 启动且工具未运行时联动启动")
         try check(!LaunchCompanionPolicy.shouldLaunchCodexBar(codexIsRunning: true, codexBarIsRunning: true), "工具已运行时不重复启动")
         try check(!LaunchCompanionPolicy.shouldLaunchCodexBar(codexIsRunning: false, codexBarIsRunning: false), "Codex 未运行时不误启动")

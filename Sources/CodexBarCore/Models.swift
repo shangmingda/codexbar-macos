@@ -62,6 +62,63 @@ public struct ResetCredit: Identifiable, Equatable, Sendable, Codable {
     }
 }
 
+public enum ResetCreditConsumeOutcome: String, Equatable, Sendable, Codable {
+    case reset
+    case nothingToReset
+    case noCredit
+    case alreadyRedeemed
+}
+
+public struct ResetCreditAutoUseRecord: Equatable, Sendable, Codable {
+    public let creditID: String
+    public let idempotencyKey: String
+    public var lastAttemptAt: Date?
+    public var completedAt: Date?
+    public var outcome: ResetCreditConsumeOutcome?
+
+    public init(
+        creditID: String,
+        idempotencyKey: String = UUID().uuidString,
+        lastAttemptAt: Date? = nil,
+        completedAt: Date? = nil,
+        outcome: ResetCreditConsumeOutcome? = nil
+    ) {
+        self.creditID = creditID
+        self.idempotencyKey = idempotencyKey
+        self.lastAttemptAt = lastAttemptAt
+        self.completedAt = completedAt
+        self.outcome = outcome
+    }
+
+    public var isCompleted: Bool { completedAt != nil }
+}
+
+public enum ResetCreditAutoUsePolicy {
+    public static func nextEligibleCredit(
+        from credits: [ResetCredit],
+        records: [String: ResetCreditAutoUseRecord],
+        now: Date,
+        leadTime: TimeInterval = 3_600,
+        retryInterval: TimeInterval = 55
+    ) -> ResetCredit? {
+        credits
+            .filter { credit in
+                guard credit.status == "available",
+                      let expiresAt = credit.expiresAt else { return false }
+                let remaining = expiresAt.timeIntervalSince(now)
+                guard remaining > 0, remaining <= leadTime else { return false }
+                guard let record = records[credit.id] else { return true }
+                if record.isCompleted { return false }
+                guard let lastAttemptAt = record.lastAttemptAt else { return true }
+                return now.timeIntervalSince(lastAttemptAt) >= retryInterval
+            }
+            .sorted {
+                ($0.expiresAt ?? .distantFuture) < ($1.expiresAt ?? .distantFuture)
+            }
+            .first
+    }
+}
+
 public struct RateLimitData: Equatable, Sendable {
     public let windows: [QuotaWindow]
     public let resetCredits: [ResetCredit]

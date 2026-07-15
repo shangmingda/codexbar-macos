@@ -66,13 +66,22 @@ CodexBar 启动本机 Codex `app-server --stdio` 并调用 `account/rateLimits/r
 
 安装脚本会执行 `launchctl setenv CODEX_APP_SERVER_USE_LOCAL_DAEMON 1`。如果安装时 Codex Desktop 已运行，旧 `stdio` 进程中的任务不能被共享服务跨进程接管。CodexBar 会持久记录待启用状态，在所有任务结束后自动完整重启一次 Codex；用户也可点击“立即启用”，确认会中断当前所有任务后立刻重启。重启后新任务由共享服务承载，达到阈值时会自动停止。
 
+### 重置卡到期前自动使用
+
+1. 功能默认关闭，用户需在重置卡行明确开启；设置保存在当前 macOS 用户的应用偏好中。
+2. 每分钟读取完整的可用卡明细，只选择剩余时间大于 0 且不超过 1 小时的卡。
+3. 多张卡同时进入窗口时优先最早到期卡，通过 `account/rateLimitResetCredit/consume` 传入具体 `creditId`。
+4. 每张卡生成并持久化一个 `idempotencyKey`，同一卡重试始终复用，防止网络超时导致重复消耗。
+5. `reset` 或 `alreadyRedeemed` 标记完成；`nothingToReset` 和 `noCredit` 不伪造成功，保留重试并重新读取账号状态。
+6. 记录保存在 `~/Library/Application Support/CodexBar/reset-credit-auto-use.json`，不包含账号凭据。
+
 ## 部署清单
 
 | 阶段 | 执行命令 | 通过标准 |
 | --- | --- | --- |
 | 环境 | `swift --version` | Swift 6 可用 |
 | 编译 | `swift build` | 无 error / warning |
-| 逻辑测试 | `swift run codexbar-selftest` | 32 项测试全部通过 |
+| 逻辑测试 | `swift run codexbar-selftest` | 42 项测试全部通过 |
 | 本机数据 | `swift run codexbar-diagnostics` | 返回额度和任务 JSON |
 | 安装 | `./scripts/install.sh` | 输出 `Installed` |
 | 签名 | `codesign --verify --deep --strict ~/Applications/CodexBar.app` | 退出码 0 |
@@ -99,3 +108,4 @@ CodexBar 启动本机 Codex `app-server --stdio` 并调用 `account/rateLimits/r
 - 如果通过浏览器下载 ZIP 导致 Gatekeeper 提示，优先使用 Git clone 后在终端运行安装脚本；不要绕过来源不明的安全警告。
 - Codex CLI 中未被桌面版加载的普通任务目前不计入桌面任务数。
 - 自动停止以 Codex 已结算并写入 rollout 的 Token 事件为准，可能比阈值多一个模型步骤；不能把全局周额度百分比可靠归因给单个并行任务。
+- 重置卡只能在 Codex 后端认为当前额度窗口可重置时消耗；返回 `nothingToReset` 时卡片仍保留。Mac 在整段提前窗口内关机或休眠时无法补用已经过期的卡。

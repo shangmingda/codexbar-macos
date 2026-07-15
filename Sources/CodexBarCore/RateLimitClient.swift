@@ -66,6 +66,50 @@ public final class RateLimitClient {
         }
     }
 
+    public func consumeResetCredit(creditID: String, idempotencyKey: String) async throws -> ResetCreditConsumeOutcome {
+        guard let executableURL else { throw RateLimitClientError.codexNotFound }
+        return try await withCheckedThrowingContinuation { continuation in
+            let session = ResetCreditConsumeSession(continuation: continuation)
+            session.process.executableURL = executableURL
+            session.process.arguments = ["app-server", "--stdio"]
+            session.process.standardInput = session.input
+            session.process.standardOutput = session.output
+            session.process.standardError = session.errors
+
+            session.output.fileHandleForReading.readabilityHandler = { handle in
+                let chunk = handle.availableData
+                guard !chunk.isEmpty else { return }
+                for line in session.accumulator.append(chunk) {
+                    if let result = Self.parseConsumeResponse(Data(line)) {
+                        session.finish(result)
+                    }
+                }
+            }
+
+            do {
+                try session.process.run()
+                let initialize = #"{"id":1,"method":"initialize","params":{"clientInfo":{"name":"codexbar","version":"1.3"},"capabilities":{"experimentalApi":true}}}"#
+                let initialized = #"{"method":"initialized"}"#
+                let consumeData = try JSONSerialization.data(withJSONObject: [
+                    "id": 2,
+                    "method": "account/rateLimitResetCredit/consume",
+                    "params": ["creditId": creditID, "idempotencyKey": idempotencyKey]
+                ])
+                var request = Data((initialize + "\n" + initialized + "\n").utf8)
+                request.append(consumeData)
+                request.append(0x0A)
+                session.input.fileHandleForWriting.write(request)
+            } catch {
+                session.finish(.failure(RateLimitClientError.launchFailed(error.localizedDescription)))
+                return
+            }
+
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) {
+                session.finish(.failure(RateLimitClientError.timeout))
+            }
+        }
+    }
+
     public static func parseResponse(_ data: Data) -> Result<RateLimitData, Error>? {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               (json["id"] as? NSNumber)?.intValue == 2 else { return nil }
@@ -132,6 +176,20 @@ public final class RateLimitClient {
             resetCreditDetailsComplete: detailsComplete
         ))
     }
+
+    public static func parseConsumeResponse(_ data: Data) -> Result<ResetCreditConsumeOutcome, Error>? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              (json["id"] as? NSNumber)?.intValue == 2 else { return nil }
+        if let error = json["error"] as? [String: Any] {
+            return .failure(RateLimitClientError.server(error["message"] as? String ?? "未知错误"))
+        }
+        guard let result = json["result"] as? [String: Any],
+              let rawOutcome = result["outcome"] as? String,
+              let outcome = ResetCreditConsumeOutcome(rawValue: rawOutcome) else {
+            return .failure(RateLimitClientError.malformedResponse)
+        }
+        return .success(outcome)
+    }
 }
 
 private final class RateLimitRequestSession: @unchecked Sendable {
@@ -147,6 +205,27 @@ private final class RateLimitRequestSession: @unchecked Sendable {
     }
 
     func finish(_ result: Result<RateLimitData, Error>) {
+        if gate.finish(result) {
+            output.fileHandleForReading.readabilityHandler = nil
+            if process.isRunning { process.terminate() }
+            try? input.fileHandleForWriting.close()
+        }
+    }
+}
+
+private final class ResetCreditConsumeSession: @unchecked Sendable {
+    let process = Process()
+    let input = Pipe()
+    let output = Pipe()
+    let errors = Pipe()
+    let accumulator = LineAccumulator()
+    private let gate: CompletionGate<ResetCreditConsumeOutcome>
+
+    init(continuation: CheckedContinuation<ResetCreditConsumeOutcome, Error>) {
+        gate = CompletionGate(continuation: continuation)
+    }
+
+    func finish(_ result: Result<ResetCreditConsumeOutcome, Error>) {
         if gate.finish(result) {
             output.fileHandleForReading.readabilityHandler = nil
             if process.isRunning { process.terminate() }
