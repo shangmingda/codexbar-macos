@@ -5,6 +5,7 @@ import SwiftUI
 struct DashboardView: View {
     @ObservedObject var state: AppState
     @State private var showAutoStopRestartConfirmation = false
+    @State private var showResetCreditAutoUseConfirmation = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -26,7 +27,7 @@ struct DashboardView: View {
     }
 
     private var panelHeight: CGFloat {
-        let creditHeight: CGFloat = state.resetCredits.isEmpty ? 0 : 28
+        let creditHeight: CGFloat = state.resetCredits.isEmpty ? 0 : (state.resetCreditNotice == nil ? 32 : 50)
         let noticeHeight: CGFloat = state.budgetNotice == nil ? 0 : 44
         return min(620, 310 + creditHeight + noticeHeight + CGFloat(min(state.tasks.count, 4)) * 74)
     }
@@ -58,17 +59,48 @@ struct DashboardView: View {
     }
 
     private var resetCreditSection: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Image(systemName: "ticket")
-                .font(.system(size: 10, weight: .semibold))
-            (Text("重置卡到期：").fontWeight(.semibold) +
-             Text(state.resetCredits.map(\.expiryLabel).joined(separator: "，")))
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: "ticket")
+                    .font(.system(size: 10, weight: .semibold))
+                (Text("重置卡到期：").fontWeight(.semibold) +
+                 Text(state.resetCredits.map(\.expiryLabel).joined(separator: "，")))
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 4)
+                Button {
+                    if state.autoUseResetCreditsEnabled {
+                        state.setAutoUseResetCreditsEnabled(false)
+                    } else {
+                        showResetCreditAutoUseConfirmation = true
+                    }
+                } label: {
+                    Label(
+                        state.autoUseResetCreditsEnabled ? "自动使用 开" : "自动使用 关",
+                        systemImage: state.autoUseResetCreditsEnabled ? "clock.badge.checkmark" : "clock"
+                    )
+                    .font(.system(size: 9.5, weight: .semibold))
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(state.autoUseResetCreditsEnabled ? Color.green : Color.secondary)
+                .help("在每张可用重置卡到期前 1 小时自动使用")
+            }
+            if let notice = state.resetCreditNotice {
+                Text(notice)
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .font(.system(size: 11))
         .foregroundStyle(.secondary)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .alert("开启重置卡自动使用？", isPresented: $showResetCreditAutoUseConfirmation) {
+            Button("取消", role: .cancel) {}
+            Button("开启自动使用") { state.setAutoUseResetCreditsEnabled(true) }
+        } message: {
+            Text("CodexBar 会在每张可用重置卡到期前 1 小时调用 Codex 官方接口。兑换成功会立即重置符合条件的额度窗口，并消耗该卡。")
+        }
     }
 
     private var quotaSection: some View {

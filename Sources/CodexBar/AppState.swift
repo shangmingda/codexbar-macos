@@ -8,6 +8,8 @@ final class AppState: ObservableObject {
     @Published private(set) var quotas: [QuotaWindow] = []
     @Published private(set) var resetCredits: [ResetCredit] = []
     @Published private(set) var resetCreditAvailableCount = 0
+    @Published private(set) var autoUseResetCreditsEnabled = false
+    @Published private(set) var resetCreditNotice: String?
     @Published private(set) var tasks: [ActiveTask] = []
     @Published private(set) var budgets: [String: TaskBudget] = [:]
     @Published private(set) var budgetNotice: String?
@@ -21,6 +23,7 @@ final class AppState: ObservableObject {
     private let rateClient = RateLimitClient()
     private let taskStore = TaskStore()
     private let budgetStore = TaskBudgetStore()
+    private let resetCreditAutoUseStore = ResetCreditAutoUseStore()
     private let controlClient = AppServerControlClient()
     private var timer: Timer?
     private var tick = 0
@@ -29,7 +32,10 @@ final class AppState: ObservableObject {
     private var budgetRefreshInFlight = false
     private var interruptInFlight = Set<String>()
     private var lastInterruptAttempt: [String: Date] = [:]
+    private var resetCreditAutoUseRecords: [String: ResetCreditAutoUseRecord] = [:]
+    private var resetCreditConsumeInFlight = false
     private let activationPendingKey = "CodexBarAutoStopActivationPending"
+    private let autoUseResetCreditsKey = "CodexBarAutoUseResetCreditsEnabled"
     private let logger = Logger(subsystem: "com.smd.codexbar", category: "refresh")
 
     var statusLines: [String] { StatusTitleFormatter.lines(windows: quotas, taskCount: tasks.count) }
@@ -37,10 +43,16 @@ final class AppState: ObservableObject {
 
     init() {
         autoStopActivationPending = UserDefaults.standard.bool(forKey: activationPendingKey)
+        autoUseResetCreditsEnabled = UserDefaults.standard.bool(forKey: autoUseResetCreditsKey)
         do {
             budgets = try budgetStore.load()
         } catch {
             budgetNotice = error.localizedDescription
+        }
+        do {
+            resetCreditAutoUseRecords = try resetCreditAutoUseStore.load()
+        } catch {
+            resetCreditNotice = error.localizedDescription
         }
     }
 
@@ -137,6 +149,7 @@ final class AppState: ObservableObject {
                     resetCredits = value.resetCredits
                     quotaError = nil
                     lastUpdated = Date()
+                    evaluateResetCreditAutoUse()
                     return
                 } catch {
                     finalError = error
@@ -156,6 +169,77 @@ final class AppState: ObservableObject {
 
     private func updateRefreshingState() {
         isRefreshing = taskRefreshInFlight || quotaRefreshInFlight
+    }
+
+    func setAutoUseResetCreditsEnabled(_ enabled: Bool) {
+        autoUseResetCreditsEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: autoUseResetCreditsKey)
+        resetCreditNotice = enabled
+            ? "已开启：每张卡到期前 1 小时自动尝试使用"
+            : "已关闭重置卡自动使用"
+        if enabled { evaluateResetCreditAutoUse() }
+    }
+
+    private func evaluateResetCreditAutoUse(now: Date = Date()) {
+        guard autoUseResetCreditsEnabled,
+              !resetCreditConsumeInFlight,
+              let credit = ResetCreditAutoUsePolicy.nextEligibleCredit(
+                from: resetCredits,
+                records: resetCreditAutoUseRecords,
+                now: now
+              ) else { return }
+
+        var record = resetCreditAutoUseRecords[credit.id] ?? ResetCreditAutoUseRecord(creditID: credit.id)
+        record.lastAttemptAt = now
+        resetCreditAutoUseRecords[credit.id] = record
+        guard persistResetCreditAutoUseRecords() else { return }
+        resetCreditConsumeInFlight = true
+
+        Task {
+            defer { resetCreditConsumeInFlight = false }
+            do {
+                let outcome = try await rateClient.consumeResetCredit(
+                    creditID: credit.id,
+                    idempotencyKey: record.idempotencyKey
+                )
+                record.outcome = outcome
+                switch outcome {
+                case .reset:
+                    record.completedAt = Date()
+                    resetCreditNotice = "已自动使用 \(credit.expiryLabel) 到期的重置卡"
+                case .alreadyRedeemed:
+                    record.completedAt = Date()
+                    resetCreditNotice = "\(credit.expiryLabel) 到期的重置卡已使用（幂等确认）"
+                case .noCredit:
+                    resetCreditNotice = "重置卡已不可用，额度状态已刷新"
+                case .nothingToReset:
+                    resetCreditNotice = "\(credit.expiryLabel) 到期卡已进入使用窗口；当前无需重置，将继续检查"
+                }
+                resetCreditAutoUseRecords[credit.id] = record
+                _ = persistResetCreditAutoUseRecords()
+                if outcome != .nothingToReset {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    refreshQuota()
+                }
+            } catch {
+                resetCreditNotice = "重置卡自动使用失败，1 分钟内重试：\(error.localizedDescription)"
+                logger.error("Reset credit auto-use failed for \(credit.id, privacy: .private): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    @discardableResult
+    private func persistResetCreditAutoUseRecords() -> Bool {
+        do {
+            try resetCreditAutoUseStore.save(resetCreditAutoUseRecords)
+            return true
+        } catch {
+            resetCreditNotice = "重置卡幂等记录保存失败，已暂停自动使用"
+            autoUseResetCreditsEnabled = false
+            UserDefaults.standard.set(false, forKey: autoUseResetCreditsKey)
+            logger.error("Reset credit auto-use persistence failed: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
     }
 
     func budget(for task: ActiveTask) -> TaskBudget? { budgets[task.id] }
