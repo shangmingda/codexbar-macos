@@ -37,6 +37,7 @@ struct Diagnostics {
                 "isRunning": $0.isRunning,
                 "tokensUsed": $0.tokensUsed,
                 "activeTurnID": $0.activeTurnID as Any,
+                "runStartedAt": $0.runStartedAt.map { ISO8601DateFormatter().string(from: $0) } as Any,
                 "isControllable": $0.isControllable
             ] }
         } catch { output["taskError"] = error.localizedDescription } }

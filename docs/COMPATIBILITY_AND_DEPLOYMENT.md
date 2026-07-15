@@ -40,6 +40,8 @@ CodexBar 启动本机 Codex `app-server --stdio` 并调用 `account/rateLimits/r
 
 `task_complete` 或 `turn_aborted` 后普通任务自动移出；同一线程同时属于两类时只显示一次。
 
+运行时间读取当前 turn 的 `task_started.started_at`，不使用会在点击、打开或访问线程时变化的数据库 `updated_at`。因此任务跳转和手动刷新不会重置秒数，运行列表排序也保持稳定。
+
 任务刷新包含三层稳定性保护：
 
 1. SQLite 读取设置 3 秒忙等待，降低 Codex 正在写库时的瞬时失败。
@@ -70,7 +72,7 @@ CodexBar 启动本机 Codex `app-server --stdio` 并调用 `account/rateLimits/r
 | --- | --- | --- |
 | 环境 | `swift --version` | Swift 6 可用 |
 | 编译 | `swift build` | 无 error / warning |
-| 逻辑测试 | `swift run codexbar-selftest` | 26 项测试全部通过 |
+| 逻辑测试 | `swift run codexbar-selftest` | 28 项测试全部通过 |
 | 本机数据 | `swift run codexbar-diagnostics` | 返回额度和任务 JSON |
 | 安装 | `./scripts/install.sh` | 输出 `Installed` |
 | 签名 | `codesign --verify --deep --strict ~/Applications/CodexBar.app` | 退出码 0 |

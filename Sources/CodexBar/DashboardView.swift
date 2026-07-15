@@ -226,7 +226,7 @@ private struct TaskRow: View {
                     }
                     Text(task.folderName).lineLimit(1)
                     Text("·")
-                    Text(task.updatedAt, style: .relative)
+                    Text(task.elapsedReferenceDate, style: .relative)
                     if let usage {
                         Text("·")
                         Text("\(TokenFormatter.compact(usage.consumedTokens))/\(TokenFormatter.compact(usage.limitTokens))")
