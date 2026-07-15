@@ -8,12 +8,37 @@ APP_SOURCE="$ROOT/dist/CodexBar.app"
 APP_TARGET="$HOME/Applications/CodexBar.app"
 AGENT="$HOME/Library/LaunchAgents/com.smd.codexbar.plist"
 WATCHER_AGENT="$HOME/Library/LaunchAgents/com.smd.codexbar.watcher.plist"
+CONTROL_AGENT="$HOME/Library/LaunchAgents/com.smd.codexbar.appserver.plist"
 SUPPORT="$HOME/Library/Application Support/CodexBar"
 WATCHER="$SUPPORT/CodexBarWatcher"
+CODEX_APP="$(mdfind 'kMDItemCFBundleIdentifier == "com.openai.codex"' | head -n 1)"
+if [[ -z "$CODEX_APP" ]]; then
+  for candidate in "/Applications/ChatGPT.app" "/Applications/Codex.app" "$HOME/Applications/ChatGPT.app" "$HOME/Applications/Codex.app"; do
+    if [[ -d "$candidate" ]]; then CODEX_APP="$candidate"; break; fi
+  done
+fi
+CODEX_BIN="$CODEX_APP/Contents/Resources/codex"
+if [[ -z "$CODEX_APP" || ! -x "$CODEX_BIN" ]]; then
+  echo "未找到 Codex Desktop，请先安装后再运行安装脚本" >&2
+  exit 1
+fi
+CODEX_GUI_EXECUTABLE="$(defaults read "$CODEX_APP/Contents/Info" CFBundleExecutable 2>/dev/null || echo ChatGPT)"
+CODEX_GUI_BIN="$CODEX_APP/Contents/MacOS/$CODEX_GUI_EXECUTABLE"
+codex_desktop_running() {
+  /bin/ps -ww -axo command= | /usr/bin/awk -v target="$CODEX_GUI_BIN" '$1 == target { found=1 } END { exit(found ? 0 : 1) }'
+}
 mkdir -p "$HOME/Applications" "$HOME/Library/LaunchAgents" "$SUPPORT"
 
+CONTROL_RESTART=1
+if launchctl print "gui/$(id -u)/com.smd.codexbar.appserver" >/dev/null 2>&1 && \
+   codex_desktop_running; then
+  CONTROL_RESTART=0
+fi
 launchctl bootout "gui/$(id -u)/com.smd.codexbar" 2>/dev/null || true
 launchctl bootout "gui/$(id -u)/com.smd.codexbar.watcher" 2>/dev/null || true
+if [[ "$CONTROL_RESTART" == "1" ]]; then
+  launchctl bootout "gui/$(id -u)/com.smd.codexbar.appserver" 2>/dev/null || true
+fi
 pkill -x CodexBar 2>/dev/null || true
 pkill -f "$WATCHER" 2>/dev/null || true
 rm -rf "$APP_TARGET"
@@ -50,6 +75,41 @@ apply_watcher_plist() {
 apply_watcher_plist
 plutil -lint "$WATCHER_AGENT" >/dev/null
 
-launchctl bootstrap "gui/$(id -u)" "$AGENT"
+apply_control_plist() {
+  /usr/libexec/PlistBuddy -c "Clear dict" "$CONTROL_AGENT" 2>/dev/null || true
+  /usr/libexec/PlistBuddy -c "Add :Label string com.smd.codexbar.appserver" "$CONTROL_AGENT"
+  /usr/libexec/PlistBuddy -c "Add :ProgramArguments array" "$CONTROL_AGENT"
+  /usr/libexec/PlistBuddy -c "Add :ProgramArguments:0 string $CODEX_BIN" "$CONTROL_AGENT"
+  /usr/libexec/PlistBuddy -c "Add :ProgramArguments:1 string app-server" "$CONTROL_AGENT"
+  /usr/libexec/PlistBuddy -c "Add :ProgramArguments:2 string --listen" "$CONTROL_AGENT"
+  /usr/libexec/PlistBuddy -c "Add :ProgramArguments:3 string unix://" "$CONTROL_AGENT"
+  /usr/libexec/PlistBuddy -c "Add :RunAtLoad bool true" "$CONTROL_AGENT"
+  /usr/libexec/PlistBuddy -c "Add :KeepAlive bool true" "$CONTROL_AGENT"
+  /usr/libexec/PlistBuddy -c "Add :ProcessType string Background" "$CONTROL_AGENT"
+  /usr/libexec/PlistBuddy -c "Add :ThrottleInterval integer 5" "$CONTROL_AGENT"
+  /usr/libexec/PlistBuddy -c "Add :StandardOutPath string /dev/null" "$CONTROL_AGENT"
+  /usr/libexec/PlistBuddy -c "Add :StandardErrorPath string /dev/null" "$CONTROL_AGENT"
+}
+apply_control_plist
+plutil -lint "$CONTROL_AGENT" >/dev/null
+
+launchctl setenv CODEX_APP_SERVER_USE_LOCAL_DAEMON 1
+if [[ "$CONTROL_RESTART" == "1" ]]; then
+  launchctl bootstrap "gui/$(id -u)" "$CONTROL_AGENT"
+else
+  echo "检测到 Codex 正在运行，保留现有共享控制服务以避免中断任务。"
+fi
 launchctl bootstrap "gui/$(id -u)" "$WATCHER_AGENT"
+launchctl bootstrap "gui/$(id -u)" "$AGENT"
+for _ in {1..24}; do
+  [[ -S "$HOME/.codex/app-server-control/app-server-control.sock" ]] && break
+  sleep 0.5
+done
+if [[ ! -S "$HOME/.codex/app-server-control/app-server-control.sock" ]]; then
+  echo "Codex 共享控制通道启动失败，请重新运行安装脚本" >&2
+  exit 1
+fi
 echo "Installed: $APP_TARGET"
+if codex_desktop_running; then
+  echo "重要：请在当前任务完成后重启一次 Codex Desktop，以启用单任务额度自动停止。"
+fi

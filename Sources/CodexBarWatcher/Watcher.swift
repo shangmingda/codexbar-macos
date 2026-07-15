@@ -31,6 +31,7 @@ final class CodexLaunchWatcher {
     }
 
     func start() {
+        enableSharedCodexAppServerForFutureLaunches()
         launchObserver = workspace.notificationCenter.addObserver(
             forName: NSWorkspace.didLaunchApplicationNotification,
             object: nil,
@@ -42,6 +43,16 @@ final class CodexLaunchWatcher {
         }
         let codexIsRunning = !NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex").isEmpty
         launchCodexBarIfNeeded(codexIsRunning: codexIsRunning)
+    }
+
+    private func enableSharedCodexAppServerForFutureLaunches() {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = ["setenv", "CODEX_APP_SERVER_USE_LOCAL_DAEMON", "1"]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+        process.waitUntilExit()
     }
 
     private func launchCodexBarIfNeeded(codexIsRunning: Bool) {

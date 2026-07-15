@@ -40,9 +40,30 @@ struct SelfTests {
         try check(tasks[0].isGoal && tasks[0].isRunning, "Goal 与普通运行状态可同时标记")
 
         let startedLine = #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}"#
+        let tokenLine = #"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":42000}}}}"#
         let completedLine = #"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}"#
         try check(TaskStore.latestLifecycleEvent(in: Data((startedLine + "\n").utf8)) == .started, "普通任务开始事件识别")
         try check(TaskStore.latestLifecycleEvent(in: Data((startedLine + "\n" + completedLine + "\n").utf8)) == .completed, "普通任务完成事件识别")
+        let runtime = TaskStore.runtimeSnapshot(in: Data((startedLine + "\n" + tokenLine + "\n").utf8))
+        try check(runtime.lifecycle == .started && runtime.activeTurnID == "turn-1", "运行任务 turn ID 识别")
+        try check(runtime.totalTokens == 42_000, "运行任务真实 Token 累计识别")
+
+        let budget = TaskBudget(threadID: "abc", limitTokens: 50_000, baselineTokens: 12_000)
+        try check(budget.usage(currentTokens: 42_000).consumedTokens == 30_000, "额度从设置时基线开始计算")
+        try check(!budget.usage(currentTokens: 61_999).hasReachedLimit, "未达到任务额度时不停止")
+        try check(budget.usage(currentTokens: 62_000).hasReachedLimit, "达到任务额度时触发停止")
+
+        let budgetURL = FileManager.default.temporaryDirectory.appendingPathComponent("codexbar-budget-test-\(UUID().uuidString).json")
+        let budgetStore = TaskBudgetStore(fileURL: budgetURL)
+        try budgetStore.save([budget.threadID: budget])
+        let restoredBudget = try budgetStore.load()[budget.threadID]
+        try check(
+            restoredBudget?.threadID == budget.threadID &&
+            restoredBudget?.limitTokens == budget.limitTokens &&
+            restoredBudget?.baselineTokens == budget.baselineTokens,
+            "任务额度配置重启后可恢复"
+        )
+        try? FileManager.default.removeItem(at: budgetURL)
         try check(LaunchCompanionPolicy.shouldLaunchCodexBar(codexIsRunning: true, codexBarIsRunning: false), "Codex 启动且工具未运行时联动启动")
         try check(!LaunchCompanionPolicy.shouldLaunchCodexBar(codexIsRunning: true, codexBarIsRunning: true), "工具已运行时不重复启动")
         try check(!LaunchCompanionPolicy.shouldLaunchCodexBar(codexIsRunning: false, codexBarIsRunning: false), "Codex 未运行时不误启动")

@@ -86,8 +86,24 @@ public struct ActiveTask: Identifiable, Equatable, Sendable, Codable {
     public let updatedAt: Date
     public let isGoal: Bool
     public let isRunning: Bool
+    public let activeTurnID: String?
+    public let rolloutPath: String?
+    public let isControllable: Bool
 
-    public init(id: String, title: String, objective: String, cwd: String, tokensUsed: Int, timeUsedSeconds: Int, updatedAt: Date, isGoal: Bool = false, isRunning: Bool = false) {
+    public init(
+        id: String,
+        title: String,
+        objective: String,
+        cwd: String,
+        tokensUsed: Int,
+        timeUsedSeconds: Int,
+        updatedAt: Date,
+        isGoal: Bool = false,
+        isRunning: Bool = false,
+        activeTurnID: String? = nil,
+        rolloutPath: String? = nil,
+        isControllable: Bool = false
+    ) {
         self.id = id
         self.title = title
         self.objective = objective
@@ -97,6 +113,9 @@ public struct ActiveTask: Identifiable, Equatable, Sendable, Codable {
         self.updatedAt = updatedAt
         self.isGoal = isGoal
         self.isRunning = isRunning
+        self.activeTurnID = activeTurnID
+        self.rolloutPath = rolloutPath
+        self.isControllable = isControllable
     }
 
     public var folderName: String {
@@ -105,6 +124,52 @@ public struct ActiveTask: Identifiable, Equatable, Sendable, Codable {
     }
 
     public var deepLink: URL? { URL(string: "codex://threads/\(id)") }
+}
+
+public struct TaskBudget: Equatable, Sendable, Codable {
+    public let threadID: String
+    public var limitTokens: Int
+    public var baselineTokens: Int
+    public var createdAt: Date
+    public var lastInterruptedTurnID: String?
+    public var lastInterruptedAt: Date?
+
+    public init(
+        threadID: String,
+        limitTokens: Int,
+        baselineTokens: Int,
+        createdAt: Date = Date(),
+        lastInterruptedTurnID: String? = nil,
+        lastInterruptedAt: Date? = nil
+    ) {
+        self.threadID = threadID
+        self.limitTokens = max(1, limitTokens)
+        self.baselineTokens = max(0, baselineTokens)
+        self.createdAt = createdAt
+        self.lastInterruptedTurnID = lastInterruptedTurnID
+        self.lastInterruptedAt = lastInterruptedAt
+    }
+
+    public func usage(currentTokens: Int) -> TaskBudgetUsage {
+        TaskBudgetUsage(
+            consumedTokens: max(0, currentTokens - baselineTokens),
+            limitTokens: limitTokens
+        )
+    }
+}
+
+public struct TaskBudgetUsage: Equatable, Sendable {
+    public let consumedTokens: Int
+    public let limitTokens: Int
+
+    public init(consumedTokens: Int, limitTokens: Int) {
+        self.consumedTokens = max(0, consumedTokens)
+        self.limitTokens = max(1, limitTokens)
+    }
+
+    public var remainingTokens: Int { max(0, limitTokens - consumedTokens) }
+    public var hasReachedLimit: Bool { consumedTokens >= limitTokens }
+    public var progress: Double { min(1, Double(consumedTokens) / Double(limitTokens)) }
 }
 
 public enum StatusTitleFormatter {

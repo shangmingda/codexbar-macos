@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.0
+
+- 任务行右侧增加独立 Token 上限配置，支持 25K、50K、100K、250K、500K、1M、2M 和 5M。
+- 上限从设置时的线程累计 Token 开始计算，配置持久化到本机应用支持目录。
+- 有上限的任务每 3 秒读取 rollout 真实 Token；达到上限后通过 `turn/interrupt` 精确停止当前 turn。
+- 增加共享 app-server LaunchAgent 和 Codex 启动环境配置，不使用 `kill` 误伤其他任务。
+- 增加控制通道只读探针、Token/turn 解析与额度持久化测试。
+
 ## 1.1.0
 
 - 增加可用重置卡真实到期日展示。

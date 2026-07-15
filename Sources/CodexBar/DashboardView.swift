@@ -26,7 +26,8 @@ struct DashboardView: View {
 
     private var panelHeight: CGFloat {
         let creditHeight: CGFloat = state.resetCredits.isEmpty ? 0 : 28
-        return min(590, 310 + creditHeight + CGFloat(min(state.tasks.count, 4)) * 70)
+        let noticeHeight: CGFloat = state.budgetNotice == nil ? 0 : 30
+        return min(620, 310 + creditHeight + noticeHeight + CGFloat(min(state.tasks.count, 4)) * 74)
     }
 
     private var hasSyncError: Bool { state.quotaError != nil || state.taskError != nil }
@@ -100,6 +101,13 @@ struct DashboardView: View {
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(Color.primary.opacity(0.07), in: Capsule())
             }
+            if let notice = state.budgetNotice {
+                Label(notice, systemImage: "gauge.with.dots.needle.50percent")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if state.tasks.isEmpty {
                 VStack(spacing: 8) {
                     Image(systemName: "checkmark.circle")
@@ -111,8 +119,18 @@ struct DashboardView: View {
             } else {
                 VStack(spacing: 2) {
                     ForEach(state.tasks) { task in
-                        Button { state.openTask(task) } label: { TaskRow(task: task) }
+                        HStack(spacing: 0) {
+                            Button { state.openTask(task) } label: {
+                                TaskRow(task: task, usage: state.budgetUsage(for: task))
+                            }
                             .buttonStyle(.plain)
+                            TaskBudgetMenu(
+                                task: task,
+                                budget: state.budget(for: task),
+                                setBudget: { state.setBudget(for: task, limitTokens: $0) },
+                                clearBudget: { state.clearBudget(for: task) }
+                            )
+                        }
                         if task.id != state.tasks.last?.id { Divider().padding(.leading, 33) }
                     }
                 }
@@ -188,6 +206,7 @@ private struct QuotaRow: View {
 
 private struct TaskRow: View {
     let task: ActiveTask
+    let usage: TaskBudgetUsage?
     var body: some View {
         HStack(spacing: 10) {
             ZStack {
@@ -208,13 +227,60 @@ private struct TaskRow: View {
                     Text(task.folderName).lineLimit(1)
                     Text("·")
                     Text(task.updatedAt, style: .relative)
+                    if let usage {
+                        Text("·")
+                        Text("\(TokenFormatter.compact(usage.consumedTokens))/\(TokenFormatter.compact(usage.limitTokens))")
+                            .foregroundStyle(usage.hasReachedLimit ? Color.red : Color.secondary)
+                    }
                 }
                 .font(.system(size: 10)).foregroundStyle(.secondary)
             }
             Spacer()
-            Image(systemName: "arrow.up.right").font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary)
         }
         .contentShape(Rectangle()).padding(.horizontal, 7).padding(.vertical, 7)
+    }
+}
+
+private struct TaskBudgetMenu: View {
+    let task: ActiveTask
+    let budget: TaskBudget?
+    let setBudget: (Int) -> Void
+    let clearBudget: () -> Void
+
+    private let presets = [25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000, 2_000_000, 5_000_000]
+
+    var body: some View {
+        Menu {
+            Text("从设置时的用量开始计算")
+            ForEach(presets, id: \.self) { value in
+                Button {
+                    setBudget(value)
+                } label: {
+                    if budget?.limitTokens == value {
+                        Label("\(TokenFormatter.compact(value)) Token", systemImage: "checkmark")
+                    } else {
+                        Text("\(TokenFormatter.compact(value)) Token")
+                    }
+                }
+            }
+            if budget != nil {
+                Divider()
+                Button("取消额度上限", role: .destructive, action: clearBudget)
+            }
+        } label: {
+            VStack(spacing: 2) {
+                Image(systemName: "gauge.with.dots.needle.50percent")
+                    .font(.system(size: 11, weight: .semibold))
+                Text(budget.map { TokenFormatter.compact($0.limitTokens) } ?? "限额")
+                    .font(.system(size: 8.5, weight: .medium, design: .rounded))
+            }
+            .foregroundStyle(budget == nil ? Color.secondary : Color.orange)
+            .frame(width: 44, height: 38)
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .help(task.isControllable ? "设置此任务的 Token 上限" : "设置后需重启一次 Codex Desktop 才能自动停止")
     }
 }
 
