@@ -268,13 +268,20 @@ private struct TaskRow: View {
                     Text(task.folderName).lineLimit(1)
                     Text("·")
                     Text(task.elapsedReferenceDate, style: .relative)
+                }
+                .font(.system(size: 10)).foregroundStyle(.secondary)
+                HStack(spacing: 5) {
+                    Text(task.isRunning
+                         ? "本轮 \(TokenFormatter.compact(task.turnTokensUsed)) Token"
+                         : "累计 \(TokenFormatter.compact(task.tokensUsed)) Token")
                     if let usage {
                         Text("·")
-                        Text("\(TokenFormatter.compact(usage.consumedTokens))/\(TokenFormatter.compact(usage.limitTokens))")
+                        Text("限额 \(TokenFormatter.compact(usage.consumedTokens))/\(TokenFormatter.compact(usage.limitTokens))（\(usage.usedPercent)%）")
                             .foregroundStyle(usage.hasReachedLimit ? Color.red : usage.needsClosingWarning ? Color.orange : Color.secondary)
                     }
                 }
-                .font(.system(size: 10)).foregroundStyle(.secondary)
+                .font(.system(size: 9.5, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
             }
             Spacer()
         }

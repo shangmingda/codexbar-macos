@@ -139,6 +139,7 @@ public struct ActiveTask: Identifiable, Equatable, Sendable, Codable {
     public let objective: String
     public let cwd: String
     public let tokensUsed: Int
+    public let turnTokensUsed: Int
     public let timeUsedSeconds: Int
     public let updatedAt: Date
     public let runStartedAt: Date?
@@ -154,6 +155,7 @@ public struct ActiveTask: Identifiable, Equatable, Sendable, Codable {
         objective: String,
         cwd: String,
         tokensUsed: Int,
+        turnTokensUsed: Int = 0,
         timeUsedSeconds: Int,
         updatedAt: Date,
         runStartedAt: Date? = nil,
@@ -168,6 +170,7 @@ public struct ActiveTask: Identifiable, Equatable, Sendable, Codable {
         self.objective = objective
         self.cwd = cwd
         self.tokensUsed = tokensUsed
+        self.turnTokensUsed = max(0, turnTokensUsed)
         self.timeUsedSeconds = timeUsedSeconds
         self.updatedAt = updatedAt
         self.runStartedAt = runStartedAt
@@ -247,6 +250,7 @@ public struct TaskBudgetUsage: Equatable, Sendable {
     public var remainingTokens: Int { max(0, limitTokens - consumedTokens) }
     public var hasReachedLimit: Bool { consumedTokens >= limitTokens }
     public var progress: Double { min(1, Double(consumedTokens) / Double(limitTokens)) }
+    public var usedPercent: Int { Int((Double(consumedTokens) / Double(limitTokens) * 100).rounded(.down)) }
     public var needsClosingWarning: Bool { !hasReachedLimit && progress >= 0.9 }
 }
 

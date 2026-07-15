@@ -26,12 +26,14 @@ public struct RolloutRuntimeSnapshot: Equatable, Sendable {
     public let lifecycle: RolloutLifecycleEvent?
     public let activeTurnID: String?
     public let totalTokens: Int
+    public let turnTokens: Int
     public let startedAt: Date?
 
-    public init(lifecycle: RolloutLifecycleEvent?, activeTurnID: String?, totalTokens: Int, startedAt: Date? = nil) {
+    public init(lifecycle: RolloutLifecycleEvent?, activeTurnID: String?, totalTokens: Int, turnTokens: Int = 0, startedAt: Date? = nil) {
         self.lifecycle = lifecycle
         self.activeTurnID = activeTurnID
         self.totalTokens = max(0, totalTokens)
+        self.turnTokens = max(0, turnTokens)
         self.startedAt = startedAt
     }
 }
@@ -40,9 +42,60 @@ private struct RunningThreadInfo {
     let threadID: String
     let turnID: String?
     let totalTokens: Int
+    let turnTokens: Int
     let startedAt: Date?
     let rolloutPath: String
     let isControllable: Bool
+}
+
+private struct ReverseRuntimeAccumulator {
+    var lifecycle: RolloutLifecycleEvent?
+    var turnID: String?
+    var startedAt: Date?
+    var latestTotalTokens: Int?
+    var turnBaselineTokens: Int?
+
+    mutating func consume(payload: [String: Any], type: String) {
+        let totalTokens: Int? = {
+            guard type == "token_count",
+                  let info = payload["info"] as? [String: Any],
+                  let total = info["total_token_usage"] as? [String: Any] else { return nil }
+            return (total["total_tokens"] as? NSNumber)?.intValue
+        }()
+
+        if lifecycle == .started, turnBaselineTokens == nil, let totalTokens {
+            turnBaselineTokens = totalTokens
+        }
+        if latestTotalTokens == nil, let totalTokens {
+            latestTotalTokens = totalTokens
+        }
+        if lifecycle == nil, let event = RolloutLifecycleEvent(rawValue: type) {
+            lifecycle = event
+            if event == .started {
+                turnID = payload["turn_id"] as? String
+                startedAt = (payload["started_at"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) }
+            }
+        }
+    }
+
+    var isComplete: Bool {
+        guard let lifecycle, latestTotalTokens != nil else { return false }
+        return lifecycle != .started || turnBaselineTokens != nil
+    }
+
+    var snapshot: RolloutRuntimeSnapshot {
+        let totalTokens = latestTotalTokens ?? 0
+        let turnTokens = lifecycle == .started
+            ? max(0, totalTokens - (turnBaselineTokens ?? 0))
+            : 0
+        return RolloutRuntimeSnapshot(
+            lifecycle: lifecycle,
+            activeTurnID: lifecycle == .started ? turnID : nil,
+            totalTokens: totalTokens,
+            turnTokens: turnTokens,
+            startedAt: lifecycle == .started ? startedAt : nil
+        )
+    }
 }
 
 public final class TaskStore {
@@ -98,35 +151,16 @@ public final class TaskStore {
     }
 
     public static func runtimeSnapshot(in data: Data) -> RolloutRuntimeSnapshot {
-        var lifecycle: RolloutLifecycleEvent?
-        var turnID: String?
-        var startedAt: Date?
-        var totalTokens = 0
+        var accumulator = ReverseRuntimeAccumulator()
         for rawLine in data.split(separator: 0x0A).reversed() {
             guard let json = try? JSONSerialization.jsonObject(with: Data(rawLine)) as? [String: Any],
                   json["type"] as? String == "event_msg",
                   let payload = json["payload"] as? [String: Any],
                   let type = payload["type"] as? String else { continue }
-            if totalTokens == 0, type == "token_count",
-               let info = payload["info"] as? [String: Any],
-               let total = info["total_token_usage"] as? [String: Any] {
-                totalTokens = (total["total_tokens"] as? NSNumber)?.intValue ?? 0
-            }
-            if lifecycle == nil, let event = RolloutLifecycleEvent(rawValue: type) {
-                lifecycle = event
-                if event == .started {
-                    turnID = payload["turn_id"] as? String
-                    startedAt = (payload["started_at"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) }
-                }
-            }
-            if lifecycle != nil, totalTokens > 0 { break }
+            accumulator.consume(payload: payload, type: type)
+            if accumulator.isComplete { break }
         }
-        return RolloutRuntimeSnapshot(
-            lifecycle: lifecycle,
-            activeTurnID: lifecycle == .started ? turnID : nil,
-            totalTokens: totalTokens,
-            startedAt: lifecycle == .started ? startedAt : nil
-        )
+        return accumulator.snapshot
     }
 
     public func refreshRuntime(for tasks: [ActiveTask]) async -> [ActiveTask] {
@@ -140,6 +174,7 @@ public final class TaskStore {
                     objective: task.objective,
                     cwd: task.cwd,
                     tokensUsed: max(task.tokensUsed, snapshot.totalTokens),
+                    turnTokensUsed: snapshot.turnTokens,
                     timeUsedSeconds: task.timeUsedSeconds,
                     updatedAt: task.updatedAt,
                     runStartedAt: snapshot.startedAt ?? task.runStartedAt,
@@ -210,6 +245,7 @@ public final class TaskStore {
                 objective: task.objective,
                 cwd: task.cwd,
                 tokensUsed: max(task.tokensUsed, runtime.totalTokens),
+                turnTokensUsed: runtime.turnTokens,
                 timeUsedSeconds: task.timeUsedSeconds,
                 updatedAt: task.updatedAt,
                 runStartedAt: runtime.startedAt,
@@ -263,6 +299,7 @@ public final class TaskStore {
                 threadID: id,
                 turnID: snapshot.activeTurnID,
                 totalTokens: snapshot.totalTokens,
+                turnTokens: snapshot.turnTokens,
                 startedAt: snapshot.startedAt,
                 rolloutPath: path,
                 isControllable: controllable
@@ -282,10 +319,7 @@ public final class TaskStore {
         let chunkSize: UInt64 = 512 * 1024
         var end = size
         var carry = Data()
-        var lifecycle: RolloutLifecycleEvent?
-        var turnID: String?
-        var startedAt: Date?
-        var totalTokens = 0
+        var accumulator = ReverseRuntimeAccumulator()
 
         while end > 0 {
             let start = end > chunkSize ? end - chunkSize : 0
@@ -299,45 +333,13 @@ public final class TaskStore {
                       json["type"] as? String == "event_msg",
                       let payload = json["payload"] as? [String: Any],
                       let type = payload["type"] as? String else { continue }
-                if totalTokens == 0, type == "token_count",
-                   let info = payload["info"] as? [String: Any],
-                   let total = info["total_token_usage"] as? [String: Any] {
-                    totalTokens = (total["total_tokens"] as? NSNumber)?.intValue ?? 0
-                }
-                if lifecycle == nil, let event = RolloutLifecycleEvent(rawValue: type) {
-                    lifecycle = event
-                    if event == .started {
-                        turnID = payload["turn_id"] as? String
-                        startedAt = (payload["started_at"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) }
-                    }
-                }
-                if lifecycle != nil, totalTokens > 0 {
-                    return RolloutRuntimeSnapshot(
-                        lifecycle: lifecycle,
-                        activeTurnID: lifecycle == .started ? turnID : nil,
-                        totalTokens: totalTokens,
-                        startedAt: lifecycle == .started ? startedAt : nil
-                    )
-                }
+                accumulator.consume(payload: payload, type: type)
+                if accumulator.isComplete { return accumulator.snapshot }
             }
             carry = start > 0 ? Data(parts.first ?? Data.SubSequence()) : Data()
             end = start
         }
-        if !carry.isEmpty {
-            let snapshot = runtimeSnapshot(in: carry)
-            if lifecycle == nil {
-                lifecycle = snapshot.lifecycle
-                turnID = snapshot.activeTurnID
-                startedAt = snapshot.startedAt
-            }
-            if totalTokens == 0 { totalTokens = snapshot.totalTokens }
-        }
-        return RolloutRuntimeSnapshot(
-            lifecycle: lifecycle,
-            activeTurnID: lifecycle == .started ? turnID : nil,
-            totalTokens: totalTokens,
-            startedAt: lifecycle == .started ? startedAt : nil
-        )
+        return accumulator.snapshot
     }
 
     private static func merge(_ tasks: [ActiveTask]) -> [ActiveTask] {
@@ -353,6 +355,7 @@ public final class TaskStore {
                 objective: existing.objective.isEmpty ? task.objective : existing.objective,
                 cwd: existing.cwd.isEmpty ? task.cwd : existing.cwd,
                 tokensUsed: max(existing.tokensUsed, task.tokensUsed),
+                turnTokensUsed: max(existing.turnTokensUsed, task.turnTokensUsed),
                 timeUsedSeconds: max(existing.timeUsedSeconds, task.timeUsedSeconds),
                 updatedAt: max(existing.updatedAt, task.updatedAt),
                 runStartedAt: existing.runStartedAt ?? task.runStartedAt,

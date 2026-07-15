@@ -54,17 +54,20 @@ CodexBar 启动本机 Codex `app-server --stdio` 并调用 `account/rateLimits/r
 - `com.smd.codexbar.watcher`：监听 `com.openai.codex` 启动事件，在 CodexBar 未运行时补启动。
 - `com.smd.codexbar.appserver`：运行 Codex 官方共享 app-server socket，使 CodexBar 能按 `threadId + turnId` 精确中断单个任务。
 - 菜单栏应用身份由 `LSUIElement` 固定声明，启动时不重复切换 activation policy，避免 macOS 26 的 AppKit 布局重入。
+- 自绘状态栏延后一轮主事件循环挂载；Popover 仅在点击时创建并在关闭后释放，避免后台 Token 刷新触发不可见窗口布局。
 - CodexBar 与 Codex Desktop 关闭互不影响。
 
 ### 单任务 Token 上限
 
 1. 任务行右侧可选择 25K～5M Token。
 2. 配置时记录该线程当前 `total_tokens` 作为基线，历史消耗不会导致任务立即停止。
-3. CodexBar 每 3 秒从对应 rollout 更新真实累计值。
+3. CodexBar 每 3 秒从对应 rollout 更新真实累计值，并用当前 `task_started` 前后的累计值差额展示“本轮 Token”。
 4. 使用量达到上限的 90% 时，通过 `turn/steer` 向当前 turn 发送一次收尾与保存状态提示；提示记录持久化，刷新或重启不会重复发送。
 5. 达到阈值且任务仍处于 `task_started` 时，通过共享 socket 调用 `turn/interrupt`。即使提示发送失败或当前 turn 不接受 steer，中断仍会独立执行。
 6. 中断请求同时携带线程 ID 与当前 turn ID，只停止目标任务；不会终止 Codex Desktop 或其他任务。
 7. 配置及已提醒/已中断的 turn 记录保存在 `~/Library/Application Support/CodexBar/task-budgets.json`，重启后仍有效。
+
+任务限额百分比按“从设置限额时起的 Token ÷ 用户设置的 Token 上限”计算，可超过 100%。Codex 返回的周额度 `usedPercent` 是账号级快照，没有 thread 归属；并行任务、其他设备或 ChatGPT 共用额度时无法真实拆分，因此界面不会把它伪装成单任务周额度占比。
 
 安装脚本会执行 `launchctl setenv CODEX_APP_SERVER_USE_LOCAL_DAEMON 1`。如果安装时 Codex Desktop 已运行，旧 `stdio` 进程中的任务不能被共享服务跨进程接管。CodexBar 会持久记录待启用状态，在所有任务结束后自动完整重启一次 Codex；用户也可点击“立即启用”，确认会中断当前所有任务后立刻重启。重启后新任务由共享服务承载，达到阈值时会自动停止。
 
