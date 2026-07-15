@@ -111,5 +111,5 @@ if [[ ! -S "$HOME/.codex/app-server-control/app-server-control.sock" ]]; then
 fi
 echo "Installed: $APP_TARGET"
 if codex_desktop_running; then
-  echo "重要：请在当前任务完成后重启一次 Codex Desktop，以启用单任务额度自动停止。"
+  echo "自动停止待启用：CodexBar 会在所有任务结束后自动完整重启一次 Codex；也可在面板确认后立即启用。"
 fi

@@ -4,6 +4,7 @@ import SwiftUI
 
 struct DashboardView: View {
     @ObservedObject var state: AppState
+    @State private var showAutoStopRestartConfirmation = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -26,7 +27,7 @@ struct DashboardView: View {
 
     private var panelHeight: CGFloat {
         let creditHeight: CGFloat = state.resetCredits.isEmpty ? 0 : 28
-        let noticeHeight: CGFloat = state.budgetNotice == nil ? 0 : 30
+        let noticeHeight: CGFloat = state.budgetNotice == nil ? 0 : 44
         return min(620, 310 + creditHeight + noticeHeight + CGFloat(min(state.tasks.count, 4)) * 74)
     }
 
@@ -102,11 +103,25 @@ struct DashboardView: View {
                     .background(Color.primary.opacity(0.07), in: Capsule())
             }
             if let notice = state.budgetNotice {
-                Label(notice, systemImage: "gauge.with.dots.needle.50percent")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.orange)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Label(notice, systemImage: "gauge.with.dots.needle.50percent")
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    if state.canActivateAutoStopNow {
+                        Button("立即启用") { showAutoStopRestartConfirmation = true }
+                            .buttonStyle(.borderless)
+                            .fontWeight(.semibold)
+                    }
+                }
+                .font(.system(size: 10.5))
+                .foregroundStyle(.orange)
+                .alert("立即启用自动停止？", isPresented: $showAutoStopRestartConfirmation) {
+                    Button("取消", role: .cancel) {}
+                    Button("重启 Codex", role: .destructive) { state.activateAutoStopNow() }
+                } message: {
+                    Text("这会完整退出并重新打开 Codex，当前 \(state.tasks.count) 个运行任务会被中断。也可以取消，等待全部任务结束后自动启用。")
+                }
             }
             if state.tasks.isEmpty {
                 VStack(spacing: 8) {
@@ -280,7 +295,7 @@ private struct TaskBudgetMenu: View {
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
-        .help(task.isControllable ? "设置此任务的 Token 上限" : "设置后需重启一次 Codex Desktop 才能自动停止")
+        .help(task.isControllable ? "设置此任务的 Token 上限" : "设置后会在任务全部结束时自动重启 Codex 并启用停止能力")
     }
 }
 

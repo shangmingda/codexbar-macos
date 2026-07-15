@@ -59,6 +59,13 @@ struct SelfTests {
         try check(!budget.usage(currentTokens: 61_999).hasReachedLimit, "未达到任务额度时不停止")
         try check(budget.usage(currentTokens: 62_000).hasReachedLimit, "达到任务额度时触发停止")
 
+        let legacyTask = ActiveTask(id: "legacy", title: "旧控制任务", objective: "", cwd: "/tmp", tokensUsed: 1, timeUsedSeconds: 1, updatedAt: Date(), isRunning: true, isControllable: false)
+        let controlledTask = ActiveTask(id: "controlled", title: "共享控制任务", objective: "", cwd: "/tmp", tokensUsed: 1, timeUsedSeconds: 1, updatedAt: Date(), isRunning: true, isControllable: true)
+        try check(AutoStopActivationPolicy.shouldSchedule(hasBudgets: true, tasks: [legacyTask]), "旧控制任务设置额度后安排启用自动停止")
+        try check(!AutoStopActivationPolicy.shouldSchedule(hasBudgets: true, tasks: [controlledTask]), "共享控制任务不重复安排重启")
+        try check(AutoStopActivationPolicy.shouldRestartWhenIdle(isPending: true, tasks: []), "所有任务结束后执行无损重启")
+        try check(!AutoStopActivationPolicy.shouldRestartWhenIdle(isPending: true, tasks: [legacyTask]), "仍有任务时不自动重启 Codex")
+
         let budgetURL = FileManager.default.temporaryDirectory.appendingPathComponent("codexbar-budget-test-\(UUID().uuidString).json")
         let budgetStore = TaskBudgetStore(fileURL: budgetURL)
         try budgetStore.save([budget.threadID: budget])
