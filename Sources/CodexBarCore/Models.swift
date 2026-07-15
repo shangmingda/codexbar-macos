@@ -192,6 +192,8 @@ public struct TaskBudget: Equatable, Sendable, Codable {
     public var limitTokens: Int
     public var baselineTokens: Int
     public var createdAt: Date
+    public var lastWarnedTurnID: String?
+    public var lastWarnedAt: Date?
     public var lastInterruptedTurnID: String?
     public var lastInterruptedAt: Date?
 
@@ -200,6 +202,8 @@ public struct TaskBudget: Equatable, Sendable, Codable {
         limitTokens: Int,
         baselineTokens: Int,
         createdAt: Date = Date(),
+        lastWarnedTurnID: String? = nil,
+        lastWarnedAt: Date? = nil,
         lastInterruptedTurnID: String? = nil,
         lastInterruptedAt: Date? = nil
     ) {
@@ -207,6 +211,8 @@ public struct TaskBudget: Equatable, Sendable, Codable {
         self.limitTokens = max(1, limitTokens)
         self.baselineTokens = max(0, baselineTokens)
         self.createdAt = createdAt
+        self.lastWarnedTurnID = lastWarnedTurnID
+        self.lastWarnedAt = lastWarnedAt
         self.lastInterruptedTurnID = lastInterruptedTurnID
         self.lastInterruptedAt = lastInterruptedAt
     }
@@ -241,6 +247,7 @@ public struct TaskBudgetUsage: Equatable, Sendable {
     public var remainingTokens: Int { max(0, limitTokens - consumedTokens) }
     public var hasReachedLimit: Bool { consumedTokens >= limitTokens }
     public var progress: Double { min(1, Double(consumedTokens) / Double(limitTokens)) }
+    public var needsClosingWarning: Bool { !hasReachedLimit && progress >= 0.9 }
 }
 
 public enum StatusTitleFormatter {

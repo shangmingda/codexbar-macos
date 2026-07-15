@@ -19,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var previewWindow: NSWindow?
     private var previewStatusView: StatusItemContentView?
     private var previewController: NSViewController?
+    private var statusUpdateScheduled = false
     private var previewMode: Bool { ProcessInfo.processInfo.arguments.contains("--preview") }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -26,7 +27,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             NSApp.setActivationPolicy(.regular)
             showPreviewWindow()
         } else {
-            NSApp.setActivationPolicy(.accessory)
             configureStatusItem()
             configurePopover()
         }
@@ -36,6 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func showPreviewWindow() {
         let controller = NSHostingController(rootView: DashboardView(state: state))
+        controller.sizingOptions = []
         let root = NSView()
         let statusBackdrop = NSVisualEffectView()
         statusBackdrop.material = .headerView
@@ -69,7 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             controller.view.bottomAnchor.constraint(equalTo: root.bottomAnchor)
         ])
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 370, height: 430),
+            contentRect: NSRect(x: 0, y: 0, width: 370, height: 620),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -106,23 +107,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.behavior = .transient
         popover.animates = true
         popover.delegate = self
-        popover.contentViewController = NSHostingController(rootView: DashboardView(state: state))
+        let controller = NSHostingController(rootView: DashboardView(state: state))
+        controller.sizingOptions = []
+        popover.contentSize = NSSize(width: 370, height: 560)
+        popover.contentViewController = controller
     }
 
     private func bindState() {
         state.objectWillChange.sink { [weak self] _ in
-            Task { @MainActor in self?.updateStatusItem() }
+            self?.scheduleStatusItemUpdate()
         }
         .store(in: &stateCancellables)
-        updateStatusItem()
+        scheduleStatusItemUpdate()
+    }
+
+    private func scheduleStatusItemUpdate() {
+        guard !statusUpdateScheduled else { return }
+        statusUpdateScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.statusUpdateScheduled = false
+            self.updateStatusItem()
+        }
     }
 
     private func updateStatusItem() {
         let lines = state.statusLines
-        contentView.lines = lines
-        previewStatusView?.lines = lines
+        if contentView.lines != lines { contentView.lines = lines }
+        if previewStatusView?.lines != lines { previewStatusView?.lines = lines }
         let maxCharacters = lines.map(\.count).max() ?? 8
-        statusItem.length = max(92, min(205, 31 + CGFloat(maxCharacters) * (lines.count > 1 ? 7 : 7.4)))
+        let desiredLength = max(92, min(205, 31 + CGFloat(maxCharacters) * (lines.count > 1 ? 7 : 7.4)))
+        if abs(statusItem.length - desiredLength) > 0.5 { statusItem.length = desiredLength }
         statusItem.button?.setAccessibilityLabel("Codex，\(lines.joined(separator: "，"))，进行中任务 \(state.tasks.count) 项")
     }
 

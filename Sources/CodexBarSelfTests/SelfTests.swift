@@ -77,8 +77,11 @@ struct SelfTests {
 
         let budget = TaskBudget(threadID: "abc", limitTokens: 50_000, baselineTokens: 12_000)
         try check(budget.usage(currentTokens: 42_000).consumedTokens == 30_000, "额度从设置时基线开始计算")
+        try check(!budget.usage(currentTokens: 56_999).needsClosingWarning, "任务额度 90% 前不发送收尾提醒")
+        try check(budget.usage(currentTokens: 57_000).needsClosingWarning, "任务额度达到 90% 时发送收尾提醒")
         try check(!budget.usage(currentTokens: 61_999).hasReachedLimit, "未达到任务额度时不停止")
         try check(budget.usage(currentTokens: 62_000).hasReachedLimit, "达到任务额度时触发停止")
+        try check(!budget.usage(currentTokens: 62_000).needsClosingWarning, "达到上限后直接中断而不重复发送提醒")
 
         let legacyTask = ActiveTask(id: "legacy", title: "旧控制任务", objective: "", cwd: "/tmp", tokensUsed: 1, timeUsedSeconds: 1, updatedAt: Date(), isRunning: true, isControllable: false)
         let controlledTask = ActiveTask(id: "controlled", title: "共享控制任务", objective: "", cwd: "/tmp", tokensUsed: 1, timeUsedSeconds: 1, updatedAt: Date(), isRunning: true, isControllable: true)
@@ -89,13 +92,31 @@ struct SelfTests {
 
         let budgetURL = FileManager.default.temporaryDirectory.appendingPathComponent("codexbar-budget-test-\(UUID().uuidString).json")
         let budgetStore = TaskBudgetStore(fileURL: budgetURL)
-        try budgetStore.save([budget.threadID: budget])
+        let warnedBudget = TaskBudget(
+            threadID: budget.threadID,
+            limitTokens: budget.limitTokens,
+            baselineTokens: budget.baselineTokens,
+            lastWarnedTurnID: "turn-warning",
+            lastWarnedAt: autoUseNow
+        )
+        try budgetStore.save([warnedBudget.threadID: warnedBudget])
         let restoredBudget = try budgetStore.load()[budget.threadID]
         try check(
             restoredBudget?.threadID == budget.threadID &&
             restoredBudget?.limitTokens == budget.limitTokens &&
             restoredBudget?.baselineTokens == budget.baselineTokens,
             "任务额度配置重启后可恢复"
+        )
+        try check(
+            restoredBudget?.lastWarnedTurnID == "turn-warning" && restoredBudget?.lastWarnedAt == autoUseNow,
+            "收尾提醒记录重启后可恢复且不会重复发送"
+        )
+        let legacyBudgetData = Data(#"{"version":1,"budgets":[{"threadID":"legacy-budget","limitTokens":25000,"baselineTokens":1000,"createdAt":"2026-07-15T00:00:00Z"}]}"#.utf8)
+        try legacyBudgetData.write(to: budgetURL, options: .atomic)
+        let legacyBudget = try budgetStore.load()["legacy-budget"]
+        try check(
+            legacyBudget?.limitTokens == 25_000 && legacyBudget?.lastWarnedTurnID == nil,
+            "旧版任务额度配置可无损升级"
         )
         try? FileManager.default.removeItem(at: budgetURL)
 

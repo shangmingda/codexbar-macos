@@ -22,14 +22,8 @@ struct DashboardView: View {
             }
             footer
         }
-        .frame(width: 370, height: panelHeight)
+        .frame(width: 370, height: 560)
         .background(.ultraThinMaterial)
-    }
-
-    private var panelHeight: CGFloat {
-        let creditHeight: CGFloat = state.resetCredits.isEmpty ? 0 : (state.resetCreditNotice == nil ? 32 : 50)
-        let noticeHeight: CGFloat = state.budgetNotice == nil ? 0 : 44
-        return min(620, 310 + creditHeight + noticeHeight + CGFloat(min(state.tasks.count, 4)) * 74)
     }
 
     private var hasSyncError: Bool { state.quotaError != nil || state.taskError != nil }
@@ -277,7 +271,7 @@ private struct TaskRow: View {
                     if let usage {
                         Text("·")
                         Text("\(TokenFormatter.compact(usage.consumedTokens))/\(TokenFormatter.compact(usage.limitTokens))")
-                            .foregroundStyle(usage.hasReachedLimit ? Color.red : Color.secondary)
+                            .foregroundStyle(usage.hasReachedLimit ? Color.red : usage.needsClosingWarning ? Color.orange : Color.secondary)
                     }
                 }
                 .font(.system(size: 10)).foregroundStyle(.secondary)
@@ -327,7 +321,7 @@ private struct TaskBudgetMenu: View {
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
-        .help(task.isControllable ? "设置此任务的 Token 上限" : "设置后会在任务全部结束时自动重启 Codex 并启用停止能力")
+        .help(task.isControllable ? "设置 Token 上限：90% 提醒收尾，100% 自动停止" : "设置后会在任务全部结束时自动重启 Codex 并启用停止能力")
     }
 }
 
