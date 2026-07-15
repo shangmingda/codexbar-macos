@@ -68,7 +68,14 @@ struct SelfTests {
         let runtime = TaskStore.runtimeSnapshot(in: Data((startedLine + "\n" + tokenLine + "\n").utf8))
         try check(runtime.lifecycle == .started && runtime.activeTurnID == "turn-1", "运行任务 turn ID 识别")
         try check(runtime.totalTokens == 42_000, "运行任务真实 Token 累计识别")
+        try check(runtime.turnTokens == 42_000, "首次 turn 从零计算真实 Token")
         try check(runtime.startedAt == Date(timeIntervalSince1970: 1_784_106_317), "任务真实开始时间识别")
+        let priorTokenLine = #"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":10000}}}}"#
+        let laterTokenLine = #"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":50000}}}}"#
+        let laterRuntime = TaskStore.runtimeSnapshot(in: Data((priorTokenLine + "\n" + startedLine + "\n" + tokenLine + "\n" + laterTokenLine + "\n").utf8))
+        try check(laterRuntime.totalTokens == 50_000 && laterRuntime.turnTokens == 40_000, "本轮 Token 使用线程累计值差额真实计算")
+        let completedRuntime = TaskStore.runtimeSnapshot(in: Data((startedLine + "\n" + tokenLine + "\n" + completedLine + "\n").utf8))
+        try check(completedRuntime.turnTokens == 0, "已完成 turn 不伪装为运行中消耗")
 
         let stableStart = Date(timeIntervalSince1970: 1_784_106_317)
         let beforeOpen = ActiveTask(id: "stable", title: "稳定计时", objective: "", cwd: "/tmp", tokensUsed: 1, timeUsedSeconds: 1, updatedAt: Date(timeIntervalSince1970: 1_784_106_400), runStartedAt: stableStart, isRunning: true)
@@ -77,6 +84,8 @@ struct SelfTests {
 
         let budget = TaskBudget(threadID: "abc", limitTokens: 50_000, baselineTokens: 12_000)
         try check(budget.usage(currentTokens: 42_000).consumedTokens == 30_000, "额度从设置时基线开始计算")
+        try check(budget.usage(currentTokens: 42_000).usedPercent == 60, "任务限额百分比精确计算")
+        try check(budget.usage(currentTokens: 87_000).usedPercent == 150, "任务超限后保留真实百分比而非截断为 100")
         try check(!budget.usage(currentTokens: 56_999).needsClosingWarning, "任务额度 90% 前不发送收尾提醒")
         try check(budget.usage(currentTokens: 57_000).needsClosingWarning, "任务额度达到 90% 时发送收尾提醒")
         try check(!budget.usage(currentTokens: 61_999).hasReachedLimit, "未达到任务额度时不停止")

@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let state = AppState()
     private let statusItem = NSStatusBar.system.statusItem(withLength: 150)
     private let popover = NSPopover()
+    private var popoverController: NSHostingController<DashboardView>?
     private let contentView = StatusItemContentView()
     private var observations: [NSKeyValueObservation] = []
     private var stateCancellables = Set<AnyCancellable>()
@@ -26,12 +27,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if previewMode {
             NSApp.setActivationPolicy(.regular)
             showPreviewWindow()
+            bindState()
+            state.start()
         } else {
-            configureStatusItem()
-            configurePopover()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.configureStatusItem()
+                self.configurePopover()
+                self.bindState()
+                self.state.start()
+            }
         }
-        bindState()
-        state.start()
     }
 
     private func showPreviewWindow() {
@@ -107,9 +113,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.behavior = .transient
         popover.animates = true
         popover.delegate = self
+        popover.contentSize = NSSize(width: 370, height: 560)
+    }
+
+    private func preparePopoverContent() {
+        guard popoverController == nil else { return }
         let controller = NSHostingController(rootView: DashboardView(state: state))
         controller.sizingOptions = []
-        popover.contentSize = NSSize(width: 370, height: 560)
+        popoverController = controller
         popover.contentViewController = controller
     }
 
@@ -147,8 +158,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             popover.performClose(nil)
         } else {
             state.refreshTasks()
+            preparePopoverContent()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
         }
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        popover.contentViewController = nil
+        popoverController = nil
     }
 }

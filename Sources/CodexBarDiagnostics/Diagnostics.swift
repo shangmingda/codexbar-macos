@@ -36,6 +36,7 @@ struct Diagnostics {
                 "isGoal": $0.isGoal,
                 "isRunning": $0.isRunning,
                 "tokensUsed": $0.tokensUsed,
+                "turnTokensUsed": $0.turnTokensUsed,
                 "activeTurnID": $0.activeTurnID as Any,
                 "runStartedAt": $0.runStartedAt.map { ISO8601DateFormatter().string(from: $0) } as Any,
                 "isControllable": $0.isControllable
