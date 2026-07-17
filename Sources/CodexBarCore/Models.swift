@@ -60,6 +60,17 @@ public struct ResetCredit: Identifiable, Equatable, Sendable, Codable {
         formatter.dateFormat = "M/d"
         return formatter.string(from: expiresAt)
     }
+
+    public var autoUseEligibleAt: Date? {
+        expiresAt?.addingTimeInterval(-3_600)
+    }
+
+    public func isInAutoUseWindow(at now: Date = Date()) -> Bool {
+        guard status == "available",
+              let expiresAt,
+              let autoUseEligibleAt else { return false }
+        return now >= autoUseEligibleAt && now < expiresAt
+    }
 }
 
 public enum ResetCreditConsumeOutcome: String, Equatable, Sendable, Codable {
