@@ -7,6 +7,7 @@ struct DashboardView: View {
     @State private var showAutoStopRestartConfirmation = false
     @State private var showResetCreditAutoUseConfirmation = false
     @State private var showResetCreditDetails = false
+    @State private var collapsedTaskGroups = Set<String>()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -15,7 +16,7 @@ struct DashboardView: View {
                 VStack(spacing: 14) {
                     quotaSection
                     taskSection
-                    if !state.resetCredits.isEmpty {
+                    if state.resetCreditAvailableCount > 0 {
                         resetCreditSection
                     }
                 }
@@ -28,6 +29,14 @@ struct DashboardView: View {
     }
 
     private var hasSyncError: Bool { state.quotaError != nil || state.taskError != nil }
+    private var syncStatus: (label: String, color: Color) {
+        if hasSyncError { return ("DEGRADED", .orange) }
+        if state.resetCreditSyncLimited { return ("PARTIAL", .orange) }
+        return ("LIVE", .green)
+    }
+    private var taskGroups: [ActiveTaskGroup] { TaskListPresentation.groups(for: state.tasks) }
+    private var duplicateTaskIDs: Set<String> { TaskListPresentation.duplicateTaskIDs(in: state.tasks) }
+    private var showsTaskGroupHeaders: Bool { taskGroups.count > 1 || state.tasks.count >= 4 }
     private var quotaModeLabel: String {
         let labels = state.quotas.map { quota in
             quota.shortLabel == "5h" ? "5 小时" : quota.shortLabel
@@ -40,6 +49,15 @@ struct DashboardView: View {
     }
     private var resetCreditExpirySummary: String {
         state.resetCredits.map(\.expiryLabel).joined(separator: "、")
+    }
+    private var resetCreditSummaryLabel: String {
+        if state.resetCredits.isEmpty {
+            return "到期时间暂未提供"
+        }
+        if state.resetCreditSyncLimited {
+            return "已同步 \(state.resetCredits.count)/\(state.resetCreditAvailableCount) 张 · \(resetCreditExpirySummary)"
+        }
+        return "到期 \(resetCreditExpirySummary)"
     }
 
     private var header: some View {
@@ -54,13 +72,23 @@ struct DashboardView: View {
             }
             Spacer()
             HStack(spacing: 5) {
-                Circle().fill(hasSyncError ? Color.orange : Color.green).frame(width: 6, height: 6)
-                Text(hasSyncError ? "DEGRADED" : "LIVE")
+                Circle().fill(syncStatus.color).frame(width: 6, height: 6)
+                Text(syncStatus.label)
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 8).padding(.vertical, 5)
             .background(.thinMaterial, in: Capsule())
+            .help(
+                [
+                    state.codexVersion,
+                    state.quotaError,
+                    state.taskError,
+                    state.resetCreditSyncSummary
+                ]
+                .compactMap { $0 }
+                .joined(separator: "\n")
+            )
         }
         .padding(.horizontal, 16).padding(.vertical, 13)
         .background(Color.primary.opacity(0.035))
@@ -77,13 +105,13 @@ struct DashboardView: View {
                         HStack(spacing: 5) {
                             Text("重置卡")
                                 .font(.system(size: 10.5, weight: .semibold))
-                            Text("\(state.resetCredits.count) 张")
+                            Text("\(state.resetCreditAvailableCount) 张")
                                 .font(.system(size: 9, weight: .bold, design: .monospaced))
                                 .foregroundStyle(Color.accentColor)
                         }
-                        Text("到期 \(resetCreditExpirySummary)")
+                        Text(resetCreditSummaryLabel)
                             .font(.system(size: 9.5))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(state.resetCreditSyncLimited ? Color.orange : Color.secondary)
                             .lineLimit(1)
                     }
                     Spacer(minLength: 5)
@@ -107,9 +135,17 @@ struct DashboardView: View {
                     .controlSize(.mini)
                 Text(state.autoUseResetCreditsEnabled ? "自动使用已开" : "自动使用")
                     .font(.system(size: 8.5, weight: .medium))
-                    .foregroundStyle(state.autoUseResetCreditsEnabled ? Color.green : Color.secondary)
+                    .foregroundStyle(
+                        state.autoUseResetCreditsEnabled && !state.resetCredits.isEmpty
+                            ? Color.green
+                            : state.autoUseResetCreditsEnabled ? Color.orange : Color.secondary
+                    )
             }
-            .help("在每张可用重置卡到期前 1 小时自动使用")
+            .help(
+                state.resetCredits.isEmpty
+                    ? "自动使用保持待命；Codex 返回真实卡 ID 和到期时间后才会执行"
+                    : "在每张可用重置卡到期前 1 小时自动使用"
+            )
         }
         .padding(.horizontal, 11).padding(.vertical, 9)
         .background(cardBackground)
@@ -145,25 +181,47 @@ struct DashboardView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Text("\(state.resetCredits.count)")
+                Text(
+                    state.resetCreditSyncLimited
+                        ? "\(state.resetCredits.count)/\(state.resetCreditAvailableCount)"
+                        : "\(state.resetCreditAvailableCount)"
+                )
                     .font(.system(size: 9.5, weight: .bold, design: .monospaced))
                     .padding(.horizontal, 7).padding(.vertical, 2)
                     .background(Color.primary.opacity(0.07), in: Capsule())
             }
 
-            VStack(spacing: 0) {
-                ForEach(state.resetCredits) { credit in
-                    ResetCreditRow(
-                        credit: credit,
-                        isEarliest: credit.id == state.resetCredits.first?.id
-                    )
-                    if credit.id != state.resetCredits.last?.id {
-                        Divider().padding(.leading, 51)
+            if state.resetCredits.isEmpty {
+                VStack(spacing: 7) {
+                    Image(systemName: "clock.badge.questionmark")
+                        .font(.system(size: 18, weight: .light))
+                        .foregroundStyle(Color.orange)
+                    Text("到期明细暂未提供")
+                        .font(.system(size: 10.5, weight: .semibold))
+                    Text("Codex 当前只返回可用数量。CodexBar 不会编造日期，也不会在缺少真实卡 ID 时尝试兑换。")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 12).padding(.vertical, 14)
+                .background(cardBackground)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(state.resetCredits) { credit in
+                        ResetCreditRow(
+                            credit: credit,
+                            isEarliest: credit.id == state.resetCredits.first?.id
+                        )
+                        if credit.id != state.resetCredits.last?.id {
+                            Divider().padding(.leading, 51)
+                        }
                     }
                 }
+                .padding(6)
+                .background(cardBackground)
             }
-            .padding(6)
-            .background(cardBackground)
 
             if state.autoUseResetCreditsEnabled, let next = nextResetCreditAutoUseAt {
                 HStack(spacing: 6) {
@@ -177,6 +235,16 @@ struct DashboardView: View {
                 }
                 .font(.system(size: 9.5, weight: .medium))
                 .foregroundStyle(Color.accentColor)
+            } else if state.autoUseResetCreditsEnabled, state.resetCredits.isEmpty {
+                Label("自动使用已待命，等待 Codex 返回真实明细", systemImage: "clock.badge.checkmark")
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundStyle(Color.orange)
+            }
+            if let syncSummary = state.resetCreditSyncSummary {
+                Text(syncSummary)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if let notice = state.resetCreditNotice {
                 Text(notice)
@@ -185,6 +253,11 @@ struct DashboardView: View {
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if let codexVersion = state.codexVersion {
+                Text(codexVersion)
+                    .font(.system(size: 8.5, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+            }
         }
         .padding(14)
         .frame(width: 290)
@@ -192,7 +265,16 @@ struct DashboardView: View {
 
     private var quotaSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionLabel("可用额度", icon: "gauge.with.dots.needle.50percent")
+            HStack {
+                sectionLabel("可用额度", icon: "gauge.with.dots.needle.50percent")
+                Spacer()
+                if let updated = state.quotaLastUpdated {
+                    Text(updated, style: .time)
+                        .font(.system(size: 8.5, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .help("额度最后同步时间")
+                }
+            }
             if state.quotas.isEmpty {
                 HStack(spacing: 9) {
                     ProgressView().controlSize(.small)
@@ -228,6 +310,12 @@ struct DashboardView: View {
             HStack {
                 sectionLabel("进行中的任务", icon: "bolt.horizontal.circle")
                 Spacer()
+                if let updated = state.taskLastUpdated {
+                    Text(updated, style: .time)
+                        .font(.system(size: 8.5, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .help("任务最后同步时间")
+                }
                 Text("\(state.tasks.count)")
                     .font(.system(size: 11, weight: .bold, design: .monospaced))
                     .foregroundStyle(state.tasks.isEmpty ? .secondary : .primary)
@@ -264,26 +352,73 @@ struct DashboardView: View {
                 }
                 .frame(maxWidth: .infinity).padding(.vertical, 18).background(cardBackground)
             } else {
-                VStack(spacing: 2) {
-                    ForEach(state.tasks) { task in
-                        HStack(spacing: 0) {
-                            Button { state.openTask(task) } label: {
-                                TaskRow(task: task, usage: state.budgetUsage(for: task))
+                VStack(spacing: 0) {
+                    ForEach(taskGroups) { group in
+                        if showsTaskGroupHeaders {
+                            Button {
+                                if collapsedTaskGroups.contains(group.id) {
+                                    collapsedTaskGroups.remove(group.id)
+                                } else {
+                                    collapsedTaskGroups.insert(group.id)
+                                }
+                            } label: {
+                                HStack(spacing: 7) {
+                                    Image(systemName: "folder")
+                                    Text(group.title)
+                                        .lineLimit(1)
+                                    Text("\(group.tasks.count)")
+                                        .fontDesign(.monospaced)
+                                        .foregroundStyle(.tertiary)
+                                    Spacer()
+                                    Image(systemName: collapsedTaskGroups.contains(group.id) ? "chevron.right" : "chevron.down")
+                                        .font(.system(size: 8, weight: .semibold))
+                                }
+                                .font(.system(size: 9.5, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 9).padding(.vertical, 7)
+                                .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
-                            TaskBudgetControl(
-                                task: task,
-                                budget: state.budget(for: task),
-                                usage: state.budgetUsage(for: task),
-                                setBudget: { state.setBudget(for: task, limitTokens: $0) },
-                                clearBudget: { state.clearBudget(for: task) }
-                            )
+                            .help(group.path.isEmpty ? "Codex" : group.path)
                         }
-                        if task.id != state.tasks.last?.id { Divider().padding(.leading, 33) }
+
+                        if !showsTaskGroupHeaders || !collapsedTaskGroups.contains(group.id) {
+                            taskRows(group.tasks, showsWorkspace: !showsTaskGroupHeaders)
+                        }
+
+                        if group.id != taskGroups.last?.id {
+                            Divider()
+                        }
                     }
                 }
                 .padding(6).background(cardBackground)
             }
+        }
+    }
+
+    @ViewBuilder
+    private func taskRows(_ tasks: [ActiveTask], showsWorkspace: Bool) -> some View {
+        ForEach(tasks) { task in
+            HStack(spacing: 0) {
+                Button { state.openTask(task) } label: {
+                    TaskRow(
+                        task: task,
+                        usage: state.budgetUsage(for: task),
+                        showsWorkspace: showsWorkspace,
+                        showsDisambiguator: duplicateTaskIDs.contains(task.id)
+                    )
+                }
+                .buttonStyle(.plain)
+                .help("\(task.title)\n\(task.cwd)\n任务 #\(task.shortID)")
+                TaskBudgetControl(
+                    task: task,
+                    budget: state.budget(for: task),
+                    usage: state.budgetUsage(for: task),
+                    setBudget: { state.setBudget(for: task, limitTokens: $0) },
+                    clearBudget: { state.clearBudget(for: task) }
+                )
+            }
+            if task.id != tasks.last?.id { Divider().padding(.leading, 33) }
         }
     }
 
@@ -397,6 +532,8 @@ private struct QuotaRow: View {
 private struct TaskRow: View {
     let task: ActiveTask
     let usage: TaskBudgetUsage?
+    let showsWorkspace: Bool
+    let showsDisambiguator: Bool
     var body: some View {
         HStack(spacing: 10) {
             ZStack {
@@ -414,7 +551,14 @@ private struct TaskRow: View {
                         Image(systemName: "target").font(.system(size: 8))
                         Text("Goal")
                     }
-                    Text(task.folderName).lineLimit(1)
+                    if showsWorkspace {
+                        Text(task.folderName).lineLimit(1)
+                    }
+                    if showsDisambiguator {
+                        Text("#\(task.shortID)")
+                            .fontDesign(.monospaced)
+                            .foregroundStyle(Color.accentColor)
+                    }
                     Text("·")
                     Text(task.elapsedReferenceDate, style: .relative)
                 }

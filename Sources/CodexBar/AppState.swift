@@ -8,6 +8,7 @@ final class AppState: ObservableObject {
     @Published private(set) var quotas: [QuotaWindow] = []
     @Published private(set) var resetCredits: [ResetCredit] = []
     @Published private(set) var resetCreditAvailableCount = 0
+    @Published private(set) var resetCreditDetailsState: ResetCreditDetailsState = .complete
     @Published private(set) var autoUseResetCreditsEnabled = false
     @Published private(set) var resetCreditNotice: String?
     @Published private(set) var tasks: [ActiveTask] = []
@@ -16,7 +17,9 @@ final class AppState: ObservableObject {
     @Published private(set) var isRefreshing = false
     @Published private(set) var quotaError: String?
     @Published private(set) var taskError: String?
-    @Published private(set) var lastUpdated: Date?
+    @Published private(set) var quotaLastUpdated: Date?
+    @Published private(set) var taskLastUpdated: Date?
+    @Published private(set) var codexVersion: String?
     @Published private(set) var autoStopActivationPending = false
     @Published private(set) var controlRestartInFlight = false
 
@@ -42,6 +45,17 @@ final class AppState: ObservableObject {
 
     var statusLines: [String] { StatusTitleFormatter.lines(windows: quotas, taskCount: tasks.count) }
     var canActivateAutoStopNow: Bool { autoStopActivationPending && !controlRestartInFlight }
+    var lastUpdated: Date? { [quotaLastUpdated, taskLastUpdated].compactMap { $0 }.max() }
+    var resetCreditSyncLimited: Bool {
+        resetCreditAvailableCount > resetCredits.count || !resetCreditDetailsState.isComplete
+    }
+    var resetCreditSyncSummary: String? {
+        guard resetCreditAvailableCount > 0, resetCreditSyncLimited else { return nil }
+        if resetCredits.isEmpty {
+            return "Codex 当前仅返回 \(resetCreditAvailableCount) 张卡的数量，未提供卡 ID 和到期时间"
+        }
+        return "Codex 当前返回 \(resetCredits.count)/\(resetCreditAvailableCount) 张卡的真实明细"
+    }
 
     init() {
         autoStopActivationPending = UserDefaults.standard.bool(forKey: activationPendingKey)
@@ -60,6 +74,7 @@ final class AppState: ObservableObject {
 
     func start() {
         refreshAll()
+        Task { codexVersion = await CodexLocator.versionString() }
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             Task { @MainActor in
@@ -102,7 +117,7 @@ final class AppState: ObservableObject {
                     }
                     tasks = value
                     taskError = nil
-                    lastUpdated = Date()
+                    taskLastUpdated = Date()
                     updateAutoStopActivationState()
                     evaluateBudgets()
                     activateAutoStopWhenIdle()
@@ -138,19 +153,15 @@ final class AppState: ObservableObject {
                     let value = try await rateClient.fetch()
                     if !value.windows.isEmpty { quotas = value.windows }
                     resetCreditAvailableCount = value.resetCreditAvailableCount
-                    if !value.resetCreditDetailsComplete {
-                        logger.warning("Reset credit details incomplete: expected \(value.resetCreditAvailableCount), received \(value.resetCredits.count)")
-                        if attempt < 3 {
-                            let delay = attempt == 1 ? 800_000_000 : 1_800_000_000
-                            try? await Task.sleep(nanoseconds: UInt64(delay))
-                            continue
-                        }
-                        quotaError = "重置卡明细暂未返回，正在自动重试"
-                        return
-                    }
+                    resetCreditDetailsState = value.resetCreditDetailsState
                     resetCredits = value.resetCredits
+                    if !value.resetCreditDetailsComplete {
+                        logger.notice(
+                            "Reset credit summary mode: expected \(value.resetCreditAvailableCount), received \(value.resetCredits.count)"
+                        )
+                    }
                     quotaError = nil
-                    lastUpdated = Date()
+                    quotaLastUpdated = Date()
                     evaluateResetCreditAutoUse()
                     return
                 } catch {
