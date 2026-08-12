@@ -111,5 +111,5 @@ if [[ ! -S "$HOME/.codex/app-server-control/app-server-control.sock" ]]; then
 fi
 echo "Installed: $APP_TARGET"
 if codex_desktop_running; then
-  echo "CodexBar 将自动检测当前任务控制状态；仅旧连接任务需要在全部结束后自动重启一次 Codex。"
+  echo "CodexBar 将自动检测当前任务控制状态；若旧连接任务需要启用自动停止，只会在你当次明确确认后重启 Codex。"
 fi

@@ -53,7 +53,7 @@ public struct ResetCredit: Identifiable, Equatable, Sendable, Codable {
     }
 
     public var expiryLabel: String {
-        guard let expiresAt else { return "未知" }
+        guard let expiresAt else { return "无到期日" }
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.timeZone = .current
@@ -78,6 +78,14 @@ public enum ResetCreditConsumeOutcome: String, Equatable, Sendable, Codable {
     case nothingToReset
     case noCredit
     case alreadyRedeemed
+}
+
+public enum ResetCreditDetailsState: String, Equatable, Sendable, Codable {
+    case complete
+    case partial
+    case summaryOnly
+
+    public var isComplete: Bool { self == .complete }
 }
 
 public struct ResetCreditAutoUseRecord: Equatable, Sendable, Codable {
@@ -134,14 +142,21 @@ public struct RateLimitData: Equatable, Sendable {
     public let windows: [QuotaWindow]
     public let resetCredits: [ResetCredit]
     public let resetCreditAvailableCount: Int
-    public let resetCreditDetailsComplete: Bool
+    public let resetCreditDetailsState: ResetCreditDetailsState
 
-    public init(windows: [QuotaWindow], resetCredits: [ResetCredit], resetCreditAvailableCount: Int, resetCreditDetailsComplete: Bool) {
+    public init(
+        windows: [QuotaWindow],
+        resetCredits: [ResetCredit],
+        resetCreditAvailableCount: Int,
+        resetCreditDetailsState: ResetCreditDetailsState
+    ) {
         self.windows = windows
         self.resetCredits = resetCredits
-        self.resetCreditAvailableCount = resetCreditAvailableCount
-        self.resetCreditDetailsComplete = resetCreditDetailsComplete
+        self.resetCreditAvailableCount = max(0, resetCreditAvailableCount)
+        self.resetCreditDetailsState = resetCreditDetailsState
     }
+
+    public var resetCreditDetailsComplete: Bool { resetCreditDetailsState.isComplete }
 }
 
 public struct ActiveTask: Identifiable, Equatable, Sendable, Codable {
@@ -197,8 +212,66 @@ public struct ActiveTask: Identifiable, Equatable, Sendable, Codable {
         return URL(fileURLWithPath: cwd).lastPathComponent
     }
 
+    public var shortID: String {
+        let compact = id.replacingOccurrences(of: "-", with: "")
+        return String(compact.suffix(6))
+    }
+
     public var deepLink: URL? { URL(string: "codex://threads/\(id)") }
     public var elapsedReferenceDate: Date { runStartedAt ?? updatedAt }
+}
+
+public struct ActiveTaskGroup: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let title: String
+    public let path: String
+    public let tasks: [ActiveTask]
+
+    public init(id: String, title: String, path: String, tasks: [ActiveTask]) {
+        self.id = id
+        self.title = title
+        self.path = path
+        self.tasks = tasks
+    }
+}
+
+public enum TaskListPresentation {
+    public static func groups(for tasks: [ActiveTask]) -> [ActiveTaskGroup] {
+        var order: [String] = []
+        var grouped: [String: [ActiveTask]] = [:]
+
+        for task in tasks {
+            let key = task.cwd.isEmpty ? "__codex__" : task.cwd
+            if grouped[key] == nil { order.append(key) }
+            grouped[key, default: []].append(task)
+        }
+
+        return order.compactMap { key in
+            guard let groupTasks = grouped[key], let first = groupTasks.first else { return nil }
+            return ActiveTaskGroup(
+                id: key,
+                title: first.folderName,
+                path: first.cwd,
+                tasks: groupTasks
+            )
+        }
+    }
+
+    public static func duplicateTaskIDs(in tasks: [ActiveTask]) -> Set<String> {
+        let grouped = Dictionary(grouping: tasks) { normalizedTitle($0.title) }
+        return Set(
+            grouped.values
+                .filter { $0.count > 1 }
+                .flatMap { $0.map(\.id) }
+        )
+    }
+
+    private static func normalizedTitle(_ value: String) -> String {
+        value
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+            .lowercased()
+    }
 }
 
 public struct TaskBudget: Equatable, Sendable, Codable {
@@ -244,8 +317,8 @@ public enum AutoStopActivationPolicy {
         hasBudgets && tasks.contains { !$0.isControllable }
     }
 
-    public static func shouldRestartWhenIdle(isPending: Bool, tasks: [ActiveTask]) -> Bool {
-        isPending && tasks.isEmpty
+    public static func mayRestartCodex(userConfirmed: Bool) -> Bool {
+        userConfirmed
     }
 }
 

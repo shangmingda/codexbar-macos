@@ -29,7 +29,7 @@ CodexBar 启动本机 Codex `app-server --stdio` 并调用 `account/rateLimits/r
 
 额度窗口根据 `windowDurationMins` 动态分类。当前只返回周窗口时显示周额度；后端恢复 300 分钟窗口时自动增加 5 小时额度。
 
-重置卡读取同一响应中的 `rateLimitResetCredits`。仅展示 `status=available` 的卡，按真实 `expiresAt` 排序；如果后端只返回卡数但未返回明细，界面保留上次成功结果并自动重试，不用“未知”代替真实日期。
+重置卡读取同一响应中的 `rateLimitResetCredits`。仅展示 `status=available` 的卡，按真实 `expiresAt` 排序。新版协议允许 `credits=null`（只知道 `availableCount`），也允许后端限制明细条数；CodexBar 会始终展示真实总数，将状态标记为 `PARTIAL`，并只对实际返回 ID 与到期时间的卡启用自动使用，不用“未知”代替真实日期。
 
 ### 任务
 
@@ -47,6 +47,7 @@ CodexBar 启动本机 Codex `app-server --stdio` 并调用 `account/rateLimits/r
 1. SQLite 读取设置 3 秒忙等待，降低 Codex 正在写库时的瞬时失败。
 2. `lsof` 运行态探测失败时自动重试三次，不立即覆盖界面。
 3. 新结果是现有任务的子集时进行二次确认，失败时保留上一次成功任务列表。
+4. 主面板按 `cwd` 将任务折叠分组，同名标题追加线程 ID 后 6 位；分组只影响展示，不改变任务计数、限额或深链。
 
 ### 自动启动
 
@@ -69,7 +70,7 @@ CodexBar 启动本机 Codex `app-server --stdio` 并调用 `account/rateLimits/r
 
 任务限额百分比按“从设置限额时起的 Token ÷ 用户设置的 Token 上限”计算，可超过 100%。Codex 返回的周额度 `usedPercent` 是账号级快照，没有 thread 归属；并行任务、其他设备或 ChatGPT 共用额度时无法真实拆分，因此界面不会把它伪装成单任务周额度占比。
 
-安装脚本会执行 `launchctl setenv CODEX_APP_SERVER_USE_LOCAL_DAEMON 1`。如果安装时 Codex Desktop 已运行，旧 `stdio` 进程中的任务不能被共享服务跨进程接管。CodexBar 会持久记录待启用状态，在所有任务结束后自动完整重启一次 Codex；用户也可点击“立即启用”，确认会中断当前所有任务后立刻重启。重启后新任务由共享服务承载，达到阈值时会自动停止。
+安装脚本会执行 `launchctl setenv CODEX_APP_SERVER_USE_LOCAL_DAEMON 1`。如果安装时 Codex Desktop 已运行，旧 `stdio` 进程中的任务不能被共享服务跨进程接管。CodexBar 只显示“手动启用”提示，不持久化重启待办，也不会在空闲或刷新时自行退出 Codex。只有用户当次点击并明确确认后才会完整重启；重启后的新任务由共享服务承载，达到阈值时会自动停止。
 
 ### 重置卡到期前自动使用
 

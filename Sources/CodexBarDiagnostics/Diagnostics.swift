@@ -8,6 +8,9 @@ struct Diagnostics {
         let quotaOnly = CommandLine.arguments.contains("--quota-only")
         let controlProbe = CommandLine.arguments.first { $0.hasPrefix("--control-probe=") }
         var output: [String: Any] = ["timestamp": ISO8601DateFormatter().string(from: Date())]
+        if let version = await CodexLocator.versionString() {
+            output["codexVersion"] = version
+        }
         if !tasksOnly { do {
             let rateLimitData = try await RateLimitClient().fetch()
             output["quota"] = rateLimitData.windows.map { [
@@ -19,6 +22,7 @@ struct Diagnostics {
             ] }
             output["resetCreditAvailableCount"] = rateLimitData.resetCreditAvailableCount
             output["resetCreditDetailsComplete"] = rateLimitData.resetCreditDetailsComplete
+            output["resetCreditDetailsState"] = rateLimitData.resetCreditDetailsState.rawValue
             output["resetCredits"] = rateLimitData.resetCredits.map { [
                 "id": $0.id,
                 "status": $0.status,
@@ -29,8 +33,14 @@ struct Diagnostics {
         } catch { output["quotaError"] = error.localizedDescription } }
         if !quotaOnly { do {
             let tasks = try await TaskStore().fetchActiveTasks()
+            output["taskGroups"] = TaskListPresentation.groups(for: tasks).map { [
+                "name": $0.title,
+                "path": $0.path,
+                "taskCount": $0.tasks.count
+            ] }
             output["activeTasks"] = tasks.map { [
                 "id": $0.id,
+                "shortID": $0.shortID,
                 "title": $0.title,
                 "cwd": $0.cwd,
                 "isGoal": $0.isGoal,

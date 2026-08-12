@@ -146,8 +146,8 @@ public final class RateLimitClient {
 
         let creditSummary = result["rateLimitResetCredits"] as? [String: Any]
         let availableCount = (creditSummary?["availableCount"] as? NSNumber)?.intValue ?? 0
-        let rawCredits = creditSummary?["credits"] as? [Any] ?? []
-        var credits = rawCredits.compactMap { rawCredit -> ResetCredit? in
+        let rawCredits = creditSummary?["credits"] as? [Any]
+        var credits = (rawCredits ?? []).compactMap { rawCredit -> ResetCredit? in
             guard let credit = rawCredit as? [String: Any],
                   let id = credit["id"] as? String,
                   let status = credit["status"] as? String,
@@ -168,12 +168,21 @@ public final class RateLimitClient {
             case (nil, nil): return $0.id < $1.id
             }
         }
-        let detailsComplete = credits.count == availableCount && credits.allSatisfy { $0.expiresAt != nil }
+        let detailsState: ResetCreditDetailsState
+        if availableCount == 0 {
+            detailsState = .complete
+        } else if rawCredits == nil {
+            detailsState = .summaryOnly
+        } else if credits.count < availableCount {
+            detailsState = .partial
+        } else {
+            detailsState = .complete
+        }
         return .success(RateLimitData(
             windows: sortedWindows,
             resetCredits: credits,
             resetCreditAvailableCount: availableCount,
-            resetCreditDetailsComplete: detailsComplete
+            resetCreditDetailsState: detailsState
         ))
     }
 

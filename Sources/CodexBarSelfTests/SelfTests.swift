@@ -48,6 +48,14 @@ struct SelfTests {
         let sparseCreditData = Data(#"{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":7,"windowDurationMins":10080}},"rateLimitResetCredits":{"availableCount":3,"credits":null}}}"#.utf8)
         let sparseCredits = try unwrap(RateLimitClient.parseResponse(sparseCreditData)?.get(), "sparse credit parse")
         try check(sparseCredits.resetCredits.isEmpty && !sparseCredits.resetCreditDetailsComplete, "卡数存在但明细缺失时不伪造未知日期")
+        try check(sparseCredits.resetCreditDetailsState == .summaryOnly, "协议只返回卡数量时识别为摘要模式")
+
+        let cappedCreditData = Data(#"{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":7,"windowDurationMins":10080}},"rateLimitResetCredits":{"availableCount":3,"credits":[{"id":"known-card","status":"available","expiresAt":1785109509,"title":"Full reset"}]}}}"#.utf8)
+        let cappedCredits = try unwrap(RateLimitClient.parseResponse(cappedCreditData)?.get(), "capped credit parse")
+        try check(cappedCredits.resetCredits.count == 1 && cappedCredits.resetCreditDetailsState == .partial, "后端限制明细数量时保留真实卡并标记部分模式")
+        let nonExpiringCreditData = Data(#"{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":7,"windowDurationMins":10080}},"rateLimitResetCredits":{"availableCount":1,"credits":[{"id":"no-expiry","status":"available","expiresAt":null,"title":"Full reset"}]}}}"#.utf8)
+        let nonExpiringCredits = try unwrap(RateLimitClient.parseResponse(nonExpiringCreditData)?.get(), "non-expiring credit parse")
+        try check(nonExpiringCredits.resetCreditDetailsComplete && nonExpiringCredits.resetCredits[0].expiryLabel == "无到期日", "无到期日卡按协议真实展示而非伪造日期")
 
         let dualData = Data(#"{"id":2,"result":{"rateLimitsByLimitId":{"codex":{"limitId":"codex","primary":{"usedPercent":70,"windowDurationMins":300,"resetsAt":1784512696},"secondary":{"usedPercent":30,"windowDurationMins":10080,"resetsAt":1784512696}}}}}"#.utf8)
         let dual = try unwrap(RateLimitClient.parseResponse(dualData)?.get(), "dual parse")
@@ -61,6 +69,14 @@ struct SelfTests {
         try check(tasks.count == 1 && tasks[0].title == "开发状态栏", "任务行解析")
         try check(tasks[0].deepLink?.absoluteString == "codex://threads/abc", "任务深链")
         try check(tasks[0].isGoal && tasks[0].isRunning, "Goal 与普通运行状态可同时标记")
+        try check(tasks[0].shortID == "abc", "任务短编号用于区分同名任务")
+
+        let duplicateA = ActiveTask(id: "task-alpha-111111", title: "相同任务 标题", objective: "", cwd: "/tmp/work-a", tokensUsed: 1, timeUsedSeconds: 1, updatedAt: Date())
+        let duplicateB = ActiveTask(id: "task-beta-222222", title: "相同任务\n标题", objective: "", cwd: "/tmp/work-a", tokensUsed: 1, timeUsedSeconds: 1, updatedAt: Date())
+        let otherWorkspace = ActiveTask(id: "task-gamma-333333", title: "其他任务", objective: "", cwd: "/tmp/work-b", tokensUsed: 1, timeUsedSeconds: 1, updatedAt: Date())
+        let presentedGroups = TaskListPresentation.groups(for: [duplicateA, duplicateB, otherWorkspace])
+        try check(presentedGroups.map(\.title) == ["work-a", "work-b"] && presentedGroups[0].tasks.count == 2, "运行任务按工作区稳定分组")
+        try check(TaskListPresentation.duplicateTaskIDs(in: [duplicateA, duplicateB, otherWorkspace]) == Set([duplicateA.id, duplicateB.id]), "空白差异不影响同名任务识别")
 
         let startedLine = #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1","started_at":1784106317}}"#
         let tokenLine = #"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":42000}}}}"#
@@ -98,8 +114,8 @@ struct SelfTests {
         let controlledTask = ActiveTask(id: "controlled", title: "共享控制任务", objective: "", cwd: "/tmp", tokensUsed: 1, timeUsedSeconds: 1, updatedAt: Date(), isRunning: true, isControllable: true)
         try check(AutoStopActivationPolicy.shouldSchedule(hasBudgets: true, tasks: [legacyTask]), "旧控制任务设置额度后安排启用自动停止")
         try check(!AutoStopActivationPolicy.shouldSchedule(hasBudgets: true, tasks: [controlledTask]), "共享控制任务不重复安排重启")
-        try check(AutoStopActivationPolicy.shouldRestartWhenIdle(isPending: true, tasks: []), "所有任务结束后执行无损重启")
-        try check(!AutoStopActivationPolicy.shouldRestartWhenIdle(isPending: true, tasks: [legacyTask]), "仍有任务时不自动重启 Codex")
+        try check(!AutoStopActivationPolicy.mayRestartCodex(userConfirmed: false), "没有当次明确确认时绝不重启 Codex")
+        try check(AutoStopActivationPolicy.mayRestartCodex(userConfirmed: true), "仅当次明确确认后允许重启 Codex")
 
         let budgetURL = FileManager.default.temporaryDirectory.appendingPathComponent("codexbar-budget-test-\(UUID().uuidString).json")
         let budgetStore = TaskBudgetStore(fileURL: budgetURL)
