@@ -58,7 +58,13 @@ final class AppState: ObservableObject {
     }
 
     init() {
-        autoStopActivationPending = UserDefaults.standard.bool(forKey: activationPendingKey)
+        // v1.4.1 and earlier persisted an "idle restart" request. A stale value could
+        // later terminate Codex without a fresh confirmation, so migration is fail-safe:
+        // discard it and require an explicit click every time a restart is needed.
+        if UserDefaults.standard.object(forKey: activationPendingKey) != nil {
+            UserDefaults.standard.removeObject(forKey: activationPendingKey)
+            budgetNotice = "已取消旧版自动重启计划；CodexBar 不会自行关闭 Codex"
+        }
         autoUseResetCreditsEnabled = UserDefaults.standard.bool(forKey: autoUseResetCreditsKey)
         do {
             budgets = try budgetStore.load()
@@ -120,7 +126,6 @@ final class AppState: ObservableObject {
                     taskLastUpdated = Date()
                     updateAutoStopActivationState()
                     evaluateBudgets()
-                    activateAutoStopWhenIdle()
                     return
                 } catch {
                     finalError = error
@@ -272,7 +277,7 @@ final class AppState: ObservableObject {
             budgetNotice = "已为“\(shortTitle(task.title))”设置 \(TokenFormatter.compact(limitTokens)) Token 上限"
         } else {
             scheduleAutoStopActivation()
-            budgetNotice = "上限已保存；任务全部结束后将自动重启 Codex 并启用自动停止"
+            budgetNotice = "上限已保存；如需自动停止，请由你确认后手动重启 Codex"
         }
         evaluateBudgets()
     }
@@ -325,7 +330,7 @@ final class AppState: ObservableObject {
 
             guard task.isControllable else {
                 scheduleAutoStopActivation()
-                budgetNotice = "“\(shortTitle(task.title))”已超限；当前任务无法迁移，任务结束后将自动启用停止能力"
+                budgetNotice = "“\(shortTitle(task.title))”已超限；CodexBar 未关闭 Codex，需你确认后手动启用停止能力"
                 continue
             }
             if let lastAttempt = lastInterruptAttempt[task.id], Date().timeIntervalSince(lastAttempt) < 8 { continue }
@@ -382,39 +387,40 @@ final class AppState: ObservableObject {
         "\(threadID):\(turnID)"
     }
 
-    func activateAutoStopNow() {
+    func activateAutoStop(userConfirmed: Bool) {
+        guard AutoStopActivationPolicy.mayRestartCodex(userConfirmed: userConfirmed) else {
+            budgetNotice = "已取消启用；CodexBar 不会自行关闭 Codex"
+            return
+        }
         scheduleAutoStopActivation()
         restartCodexForAutoStop()
     }
 
     private func updateAutoStopActivationState() {
-        if AutoStopActivationPolicy.shouldSchedule(hasBudgets: !budgets.isEmpty, tasks: tasks) {
+        let budgetedTasks = tasks.filter { budgets[$0.id] != nil }
+        if AutoStopActivationPolicy.shouldSchedule(hasBudgets: !budgetedTasks.isEmpty, tasks: budgetedTasks) {
             scheduleAutoStopActivation()
             if budgetNotice == nil {
-                budgetNotice = "自动停止待启用；所有任务结束后将自动重启 Codex"
+                budgetNotice = "自动停止需手动启用；CodexBar 不会自行重启 Codex"
             }
-        } else if autoStopActivationPending, !tasks.isEmpty, tasks.allSatisfy(\.isControllable) {
+        } else if autoStopActivationPending {
             clearAutoStopActivationPending()
-            budgetNotice = "自动停止已启用；任务达到上限后会自动中断"
+            if !budgetedTasks.isEmpty, budgetedTasks.allSatisfy(\.isControllable) {
+                budgetNotice = "自动停止已启用；任务达到上限后会自动中断"
+            }
         }
     }
 
     private func scheduleAutoStopActivation() {
         autoStopActivationPending = true
-        UserDefaults.standard.set(true, forKey: activationPendingKey)
+        // Deliberately not persisted: reopening CodexBar must never revive an old
+        // request to terminate Codex.
+        UserDefaults.standard.removeObject(forKey: activationPendingKey)
     }
 
     private func clearAutoStopActivationPending() {
         autoStopActivationPending = false
         UserDefaults.standard.removeObject(forKey: activationPendingKey)
-    }
-
-    private func activateAutoStopWhenIdle() {
-        guard AutoStopActivationPolicy.shouldRestartWhenIdle(
-            isPending: autoStopActivationPending,
-            tasks: tasks
-        ) else { return }
-        restartCodexForAutoStop()
     }
 
     private func restartCodexForAutoStop() {

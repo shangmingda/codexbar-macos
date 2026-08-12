@@ -329,18 +329,18 @@ struct DashboardView: View {
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 4)
                     if state.canActivateAutoStopNow {
-                        Button("立即启用") { showAutoStopRestartConfirmation = true }
+                        Button("手动启用") { showAutoStopRestartConfirmation = true }
                             .buttonStyle(.borderless)
                             .fontWeight(.semibold)
                     }
                 }
                 .font(.system(size: 10.5))
                 .foregroundStyle(.orange)
-                .alert("立即启用自动停止？", isPresented: $showAutoStopRestartConfirmation) {
+                .alert("重启 Codex 并启用自动停止？", isPresented: $showAutoStopRestartConfirmation) {
                     Button("取消", role: .cancel) {}
-                    Button("重启 Codex", role: .destructive) { state.activateAutoStopNow() }
+                    Button("确认重启", role: .destructive) { state.activateAutoStop(userConfirmed: true) }
                 } message: {
-                    Text("这会完整退出并重新打开 Codex，当前 \(state.tasks.count) 个运行任务会被中断。也可以取消，等待全部任务结束后自动启用。")
+                    Text("只有点击“确认重启”才会退出并重新打开 Codex，当前 \(state.tasks.count) 个运行任务会被中断。取消后 CodexBar 不会在后台自动执行。")
                 }
             }
             if state.tasks.isEmpty {
@@ -678,7 +678,7 @@ private struct TaskBudgetControl: View {
             .padding(14)
             .frame(width: 280)
         }
-        .help(task.isControllable ? "设置 Token 上限：90% 提醒收尾，100% 自动停止" : "设置后会在任务全部结束时自动重启 Codex 并启用停止能力")
+        .help(task.isControllable ? "设置 Token 上限：90% 提醒收尾，100% 自动停止" : "设置上限后需由你确认重启 Codex；CodexBar 不会自行关闭 Codex")
         .accessibilityLabel(budget == nil ? "为任务设置 Token 上限" : "任务上限 \(TokenFormatter.compact(budget?.limitTokens ?? 0)) Token，已使用 \(usage?.usedPercent ?? 0)%")
     }
 

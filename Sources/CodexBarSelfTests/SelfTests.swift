@@ -114,8 +114,8 @@ struct SelfTests {
         let controlledTask = ActiveTask(id: "controlled", title: "共享控制任务", objective: "", cwd: "/tmp", tokensUsed: 1, timeUsedSeconds: 1, updatedAt: Date(), isRunning: true, isControllable: true)
         try check(AutoStopActivationPolicy.shouldSchedule(hasBudgets: true, tasks: [legacyTask]), "旧控制任务设置额度后安排启用自动停止")
         try check(!AutoStopActivationPolicy.shouldSchedule(hasBudgets: true, tasks: [controlledTask]), "共享控制任务不重复安排重启")
-        try check(AutoStopActivationPolicy.shouldRestartWhenIdle(isPending: true, tasks: []), "所有任务结束后执行无损重启")
-        try check(!AutoStopActivationPolicy.shouldRestartWhenIdle(isPending: true, tasks: [legacyTask]), "仍有任务时不自动重启 Codex")
+        try check(!AutoStopActivationPolicy.mayRestartCodex(userConfirmed: false), "没有当次明确确认时绝不重启 Codex")
+        try check(AutoStopActivationPolicy.mayRestartCodex(userConfirmed: true), "仅当次明确确认后允许重启 Codex")
 
         let budgetURL = FileManager.default.temporaryDirectory.appendingPathComponent("codexbar-budget-test-\(UUID().uuidString).json")
         let budgetStore = TaskBudgetStore(fileURL: budgetURL)

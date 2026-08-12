@@ -317,8 +317,8 @@ public enum AutoStopActivationPolicy {
         hasBudgets && tasks.contains { !$0.isControllable }
     }
 
-    public static func shouldRestartWhenIdle(isPending: Bool, tasks: [ActiveTask]) -> Bool {
-        isPending && tasks.isEmpty
+    public static func mayRestartCodex(userConfirmed: Bool) -> Bool {
+        userConfirmed
     }
 }
 
