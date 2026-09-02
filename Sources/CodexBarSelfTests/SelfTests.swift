@@ -76,6 +76,8 @@ struct SelfTests {
         let dueLater = ResetCredit(id: "later", status: "available", expiresAt: autoUseNow.addingTimeInterval(3_601), title: nil)
         let dueSoon = ResetCredit(id: "soon", status: "available", expiresAt: autoUseNow.addingTimeInterval(3_600), title: nil)
         let dueSooner = ResetCredit(id: "sooner", status: "available", expiresAt: autoUseNow.addingTimeInterval(1_800), title: nil)
+        try check(dueSoon.autoUseEligibleAt == autoUseNow, "重置卡自动使用时间为到期前一小时")
+        try check(dueSooner.isInAutoUseWindow(at: autoUseNow), "重置卡可识别当前是否进入自动使用窗口")
         try check(ResetCreditAutoUsePolicy.nextEligibleCredit(from: [dueLater], records: [:], now: autoUseNow) == nil, "到期前超过一小时不使用重置卡")
         try check(ResetCreditAutoUsePolicy.nextEligibleCredit(from: [dueSoon], records: [:], now: autoUseNow)?.id == "soon", "到期前一小时进入自动使用窗口")
         try check(ResetCreditAutoUsePolicy.nextEligibleCredit(from: [dueSoon, dueSooner], records: [:], now: autoUseNow)?.id == "sooner", "多张卡优先使用最早到期卡")

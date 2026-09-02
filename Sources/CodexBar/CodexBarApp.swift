@@ -67,9 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         statusBackdrop.layer?.cornerRadius = 8
         let statusPreview = StatusItemContentView()
         statusPreview.lines = state.statusLines
-        if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.openai.codex") {
-            statusPreview.icon = NSWorkspace.shared.icon(forFile: appURL.path)
-        }
+        statusPreview.icon = CodexBarBrand.image(size: 17)
         statusBackdrop.addSubview(statusPreview)
         root.addSubview(statusBackdrop)
         root.addSubview(controller.view)
@@ -116,11 +114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         button.toolTip = "Codex 状态"
         contentView.frame = button.bounds
         contentView.autoresizingMask = [.width, .height]
-        if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.openai.codex") {
-            contentView.icon = NSWorkspace.shared.icon(forFile: appURL.path)
-        } else {
-            contentView.icon = NSImage(systemSymbolName: "chevron.left.forwardslash.chevron.right", accessibilityDescription: "Codex")
-        }
+        contentView.icon = CodexBarBrand.image(size: 17)
         button.addSubview(contentView)
     }
 

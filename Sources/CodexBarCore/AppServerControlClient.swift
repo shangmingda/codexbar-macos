@@ -91,7 +91,7 @@ public final class AppServerControlClient: @unchecked Sendable {
             "id": 1,
             "method": "initialize",
             "params": [
-                "clientInfo": ["name": "codexbar", "version": "1.3.2"],
+                "clientInfo": ["name": "codexbar", "version": "1.4.0"],
                 "capabilities": ["experimentalApi": true]
             ]
         ])
