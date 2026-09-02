@@ -133,7 +133,9 @@ public final class TaskStore {
                 isRunning: (row["is_running"] as? NSNumber)?.boolValue ?? false,
                 activeTurnID: row["turn_id"] as? String,
                 rolloutPath: row["rollout_path"] as? String,
-                isControllable: (row["is_controllable"] as? NSNumber)?.boolValue ?? false
+                isControllable: (row["is_controllable"] as? NSNumber)?.boolValue ?? false,
+                modelProvider: row["model_provider"] as? String,
+                model: row["model"] as? String
             )
         }
     }
@@ -182,7 +184,9 @@ public final class TaskStore {
                     isRunning: snapshot.lifecycle == .started,
                     activeTurnID: snapshot.activeTurnID,
                     rolloutPath: task.rolloutPath,
-                    isControllable: task.isControllable
+                    isControllable: task.isControllable,
+                    modelProvider: task.modelProvider,
+                    model: task.model
                 )
             }
         }.value
@@ -214,7 +218,8 @@ public final class TaskStore {
                g.objective, MAX(g.tokens_used, COALESCE(t.tokens_used,0)) AS tokens_used,
                g.time_used_seconds, g.updated_at_ms,
                COALESCE(t.cwd,'') AS cwd, 1 AS is_goal, 0 AS is_running,
-               NULL AS turn_id, t.rollout_path AS rollout_path, 0 AS is_controllable
+               NULL AS turn_id, t.rollout_path AS rollout_path, 0 AS is_controllable,
+               COALESCE(t.model_provider,'openai') AS model_provider, t.model AS model
         FROM thread_goals g
         LEFT JOIN state.threads t ON t.id=g.thread_id
         WHERE g.status='active'
@@ -234,7 +239,8 @@ public final class TaskStore {
                COALESCE(tokens_used,0) AS tokens_used, 0 AS time_used_seconds,
                CASE WHEN updated_at_ms IS NOT NULL THEN updated_at_ms ELSE updated_at * 1000 END AS updated_at_ms,
                COALESCE(cwd,'') AS cwd, 0 AS is_goal, 1 AS is_running,
-               NULL AS turn_id, rollout_path AS rollout_path, 0 AS is_controllable
+               NULL AS turn_id, rollout_path AS rollout_path, 0 AS is_controllable,
+               COALESCE(model_provider,'openai') AS model_provider, model AS model
         FROM threads WHERE id IN (\(list));
         """
         return try decodeRows(runSQLite(database: stateDB, sql: sql)).map { task in
@@ -253,7 +259,9 @@ public final class TaskStore {
                 isRunning: true,
                 activeTurnID: runtime.turnID,
                 rolloutPath: runtime.rolloutPath,
-                isControllable: runtime.isControllable
+                isControllable: runtime.isControllable,
+                modelProvider: task.modelProvider,
+                model: task.model
             )
         }
     }
@@ -363,7 +371,9 @@ public final class TaskStore {
                 isRunning: existing.isRunning || task.isRunning,
                 activeTurnID: existing.activeTurnID ?? task.activeTurnID,
                 rolloutPath: existing.rolloutPath ?? task.rolloutPath,
-                isControllable: existing.isControllable || task.isControllable
+                isControllable: existing.isControllable || task.isControllable,
+                modelProvider: existing.modelProvider ?? task.modelProvider,
+                model: existing.model ?? task.model
             )
         }
         return result.values.sorted {

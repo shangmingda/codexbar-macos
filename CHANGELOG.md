@@ -1,5 +1,41 @@
 # Changelog
 
+## 1.4.7
+
+- 修复周额度偶发或持续错误显示 100% 的问题。
+- 兼容 Codex 同时返回 `codex` 与 `base_model_inference` / `gpt-reserve` 多产品限额的新结构，不再按无序字典结果混合周窗口。
+- 优先读取官方主 `rateLimits` 快照，其次精确选择 `codex` limitId；仅在两者都缺失时使用确定性降级选择。
+- 增加当前真实多产品响应回归用例，确保 `gpt-reserve` 的 100% 周窗口不会覆盖 Codex 周额度。
+
+## 1.4.6
+
+- 修复本地临时签名升级后反复弹出 DeepSeek Keychain 授权框的问题。
+- 启动时只非交互读取 Keychain 条目元数据，不读取 API Key 密文。
+- OpenAI 模式不再后台刷新 DeepSeek 余额；只有 DeepSeek 模式且已配置 Key 时才允许。
+- 用户明确切换 DeepSeek 时最多读取一次 Keychain，本次 CodexBar 进程内缓存 Key，余额与模型校验不再重复触发系统授权。
+- `codexbar-diagnostics` 完全禁止读取 macOS Keychain；需要 DeepSeek API 诊断时只接受当次进程环境参数。
+
+## 1.4.5
+
+- 修复 DeepSeek 模式无法打开 OpenAI 原对话、OpenAI 模式无法打开 DeepSeek 原对话的交互断路。
+- 点击其他 Provider 的任务时，先明确说明重启影响并征得当次确认，然后切回该任务原 Provider/模型并打开原对话。
+- 切换后不再为已有对话新建替代任务；未知 Provider 或未知 DeepSeek 模型继续安全阻止。
+- 增加 OpenAI/DeepSeek 双向切换、DeepSeek 精确模型恢复和未知来源保护回归测试。
+
+## 1.4.4
+
+- 增加 `deepseek-v4-flash-vision-exp`，界面显示为 V4 Vision，并支持官方目录声明的图片输入能力。
+- 兼容 DeepSeek 最新安装脚本的 `write_models_json "$1"` 目录格式，同时保留旧格式解析。
+- 切换模型前使用当前 Key 查询 DeepSeek `/models`，账号未返回目标模型时不修改 Codex 配置。
+- 增加 Vision 模型目录解析、API 列表、配置写入和可逆切换测试。
+
+## 1.4.3
+
+- 修复旧版持久化重启待办在任务列表短暂为空时弹出 ChatGPT 退出确认的问题。
+- 移除空闲、启动恢复和后台租约恢复中的自动退出；所有 Codex 重启均须用户当次明确确认。
+- 升级时清除旧版 `CodexBarAutoStopActivationPending`，且不再持久化重启请求。
+- 仅检查设置了上限的具体任务，历史上限不再影响无关运行任务。
+
 ## 1.3.0
 
 - 增加重置卡到期前 1 小时自动使用开关；新安装默认关闭，需用户明确开启。

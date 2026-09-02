@@ -1,8 +1,19 @@
 import AppKit
+import CodexBarCore
 import Combine
 import SwiftUI
 
 @main
+enum CodexBarMain {
+    static func main() {
+        if CommandLine.arguments.contains("--delete-deepseek-credential") {
+            do { try DeepSeekCredentialStore().delete(); exit(0) }
+            catch { exit(1) }
+        }
+        CodexBarApp.main()
+    }
+}
+
 struct CodexBarApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     var body: some Scene { Settings { EmptyView() } }
@@ -10,7 +21,9 @@ struct CodexBarApp: App {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
-    private let state = AppState()
+    private let state = AppState(
+        previewMode: ProcessInfo.processInfo.arguments.contains("--preview")
+    )
     private let statusItem = NSStatusBar.system.statusItem(withLength: 150)
     private let popover = NSPopover()
     private var popoverController: NSHostingController<DashboardView>?
@@ -21,14 +34,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var previewStatusView: StatusItemContentView?
     private var previewController: NSViewController?
     private var statusUpdateScheduled = false
+    private var terminationInFlight = false
     private var previewMode: Bool { ProcessInfo.processInfo.arguments.contains("--preview") }
+    private var deepSeekPreviewMode: Bool { ProcessInfo.processInfo.arguments.contains("--preview-deepseek") }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if previewMode {
+            if deepSeekPreviewMode { state.applyDeepSeekPreviewState() }
             NSApp.setActivationPolicy(.regular)
             showPreviewWindow()
             bindState()
-            state.start()
         } else {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
@@ -167,5 +182,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     func popoverDidClose(_ notification: Notification) {
         popover.contentViewController = nil
         popoverController = nil
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard state.needsProviderRollbackOnExit else { return .terminateNow }
+        guard !terminationInFlight else { return .terminateLater }
+        terminationInFlight = true
+        Task { @MainActor in
+            let safeToQuit = await state.prepareForTermination()
+            terminationInFlight = false
+            sender.reply(toApplicationShouldTerminate: safeToQuit)
+            if !safeToQuit {
+                preparePopoverContent()
+                if let button = statusItem.button {
+                    popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+                }
+            }
+        }
+        return .terminateLater
     }
 }

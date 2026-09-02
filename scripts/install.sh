@@ -29,6 +29,20 @@ codex_desktop_running() {
 }
 mkdir -p "$HOME/Applications" "$HOME/Library/LaunchAgents" "$SUPPORT"
 
+PROVIDER_ROLLBACK=0
+if [[ -x "$WATCHER" ]] && /usr/bin/grep -a -q -- '--restore-only' "$WATCHER"; then
+  set +e
+  "$WATCHER" --restore-only
+  ROLLBACK_STATUS=$?
+  set -e
+  if [[ "$ROLLBACK_STATUS" == "10" ]]; then
+    PROVIDER_ROLLBACK=1
+  elif [[ "$ROLLBACK_STATUS" != "0" && "$ROLLBACK_STATUS" != "2" ]]; then
+    echo "升级前恢复 OpenAI 配置失败，已停止安装以保护 Codex 原配置" >&2
+    exit 1
+  fi
+fi
+
 CONTROL_RESTART=1
 if launchctl print "gui/$(id -u)/com.smd.codexbar.appserver" >/dev/null 2>&1 && \
    codex_desktop_running; then
@@ -101,6 +115,9 @@ else
 fi
 launchctl bootstrap "gui/$(id -u)" "$WATCHER_AGENT"
 launchctl bootstrap "gui/$(id -u)" "$AGENT"
+if [[ "$PROVIDER_ROLLBACK" == "1" ]] && codex_desktop_running; then
+  echo "OpenAI 配置已恢复；CodexBar 未自动退出 Codex，请在方便时手动按 ⌘Q 退出并重新打开" >&2
+fi
 for _ in {1..24}; do
   [[ -S "$HOME/.codex/app-server-control/app-server-control.sock" ]] && break
   sleep 0.5
@@ -111,5 +128,5 @@ if [[ ! -S "$HOME/.codex/app-server-control/app-server-control.sock" ]]; then
 fi
 echo "Installed: $APP_TARGET"
 if codex_desktop_running; then
-  echo "CodexBar 将自动检测当前任务控制状态；仅旧连接任务需要在全部结束后自动重启一次 Codex。"
+  echo "CodexBar 将自动检测当前任务控制状态；若旧连接任务需要启用自动停止，只会在你当次明确确认后重启 Codex。"
 fi

@@ -6,6 +6,11 @@ struct DashboardView: View {
     @ObservedObject var state: AppState
     @State private var showAutoStopRestartConfirmation = false
     @State private var showResetCreditAutoUseConfirmation = false
+    @State private var showDeepSeekKeyConfiguration = false
+    @State private var showProviderRestartConfirmation = false
+    @State private var pendingProviderMode: ModelProviderMode?
+    @State private var pendingDeepSeekModel: DeepSeekModel?
+    @State private var pendingTaskToOpen: ActiveTask?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -24,6 +29,21 @@ struct DashboardView: View {
         }
         .frame(width: 370, height: 560)
         .background(.ultraThinMaterial)
+        .sheet(isPresented: $showDeepSeekKeyConfiguration) {
+            DeepSeekKeyConfigurationView(state: state)
+        }
+        .alert(providerSwitchConfirmationTitle, isPresented: $showProviderRestartConfirmation) {
+            Button("取消，保持当前模型", role: .cancel) {
+                pendingProviderMode = nil
+                pendingDeepSeekModel = nil
+                pendingTaskToOpen = nil
+            }
+            Button(providerSwitchConfirmationActionTitle, role: .destructive) {
+                performPendingProviderSwitch()
+            }
+        } message: {
+            Text(providerSwitchConfirmationMessage)
+        }
     }
 
     private var hasSyncError: Bool { state.quotaError != nil || state.taskError != nil }
@@ -99,22 +119,205 @@ struct DashboardView: View {
 
     private var quotaSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionLabel("可用额度", icon: "gauge.with.dots.needle.50percent")
-            if state.quotas.isEmpty {
-                HStack(spacing: 9) {
-                    ProgressView().controlSize(.small)
-                    Text(state.quotaError ?? "正在读取 Codex 额度…")
-                        .font(.system(size: 12)).foregroundStyle(.secondary)
+            HStack {
+                sectionLabel("可用额度", icon: "gauge.with.dots.needle.50percent")
+                Spacer()
+                Button { showDeepSeekKeyConfiguration = true } label: {
+                    Label("配置", systemImage: "key.horizontal")
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(13).background(cardBackground)
+                .buttonStyle(.borderless)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+                .help("配置或更换 DeepSeek API Key")
+            }
+            Picker("模型来源", selection: Binding(
+                get: { state.activeProviderMode },
+                set: { requestProviderSwitch(to: $0, model: nil) }
+            )) {
+                Text("OpenAI").tag(ModelProviderMode.openAI)
+                Text("DeepSeek").tag(ModelProviderMode.deepSeek)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .disabled(state.isProviderSwitching)
+
+            if state.activeProviderMode == .openAI {
+                openAIQuotaCard
             } else {
-                VStack(spacing: 12) {
-                    ForEach(state.quotas) { quota in QuotaRow(quota: quota) }
-                }
-                .padding(13).background(cardBackground)
+                deepSeekQuotaCard
+            }
+            if let notice = state.providerNotice {
+                Label(notice, systemImage: state.isProviderSwitching ? "arrow.triangle.2.circlepath" : "checkmark.shield")
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(state.providerNotice?.contains("失败") == true ? Color.orange : Color.secondary)
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+
+    @ViewBuilder
+    private var openAIQuotaCard: some View {
+        if state.quotas.isEmpty {
+            HStack(spacing: 9) {
+                ProgressView().controlSize(.small)
+                Text(state.quotaError ?? "正在读取 Codex 额度…")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(13).background(cardBackground)
+        } else {
+            VStack(spacing: 12) {
+                HStack {
+                    Label("Codex 原生模式", systemImage: "checkmark.seal.fill")
+                        .foregroundStyle(.green)
+                    Spacer()
+                    Text("原配置 · 原参数")
+                        .foregroundStyle(.secondary)
+                }
+                .font(.system(size: 10.5, weight: .semibold))
+                ForEach(state.quotas) { quota in QuotaRow(quota: quota) }
+            }
+            .padding(13).background(cardBackground)
+        }
+    }
+
+    private var deepSeekQuotaCard: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            Picker("DeepSeek 模型", selection: Binding(
+                get: { state.activeDeepSeekModel },
+                set: { requestProviderSwitch(to: .deepSeek, model: $0) }
+            )) {
+                ForEach(DeepSeekModel.allCases) { model in Text(model.shortName).tag(model) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .disabled(state.isProviderSwitching)
+
+            if let balance = state.deepSeekBalance {
+                HStack(alignment: .firstTextBaseline) {
+                    Label(balance.isAvailable ? "API 可用" : "余额不足", systemImage: balance.isAvailable ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                        .foregroundStyle(balance.isAvailable ? Color.green : Color.red)
+                    Spacer()
+                    Text(state.activeDeepSeekModel.displayName)
+                        .foregroundStyle(.secondary)
+                }
+                .font(.system(size: 10.5, weight: .semibold))
+                ForEach(balance.balances) { item in
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(item.currency == "CNY" ? "人民币余额" : "美元余额")
+                            .font(.system(size: 11))
+                        Spacer()
+                        Text(item.formattedTotal)
+                            .font(.system(size: 18, weight: .semibold, design: .rounded))
+                    }
+                }
+            } else if state.deepSeekKeyConfigured {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(state.deepSeekError ?? "正在读取 DeepSeek 余额…")
+                }
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            } else {
+                Button("配置 DeepSeek API Key") { showDeepSeekKeyConfiguration = true }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+            }
+
+            if !state.quotas.isEmpty {
+                Divider()
+                HStack {
+                    Label("OpenAI 备用额度", systemImage: "arrow.uturn.backward.circle")
+                    Spacer()
+                    Text(state.quotas.map { "\($0.shortLabel) \($0.remainingPercent)%" }.joined(separator: " · "))
+                }
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(.secondary)
+            }
+        }
+        .padding(13).background(cardBackground)
+    }
+
+    private func requestProviderSwitch(to mode: ModelProviderMode, model: DeepSeekModel?) {
+        if mode == .deepSeek, !state.deepSeekKeyConfigured {
+            showDeepSeekKeyConfiguration = true
+            return
+        }
+        let targetModel = model ?? state.activeDeepSeekModel
+        if mode == state.activeProviderMode,
+           mode == .openAI || (mode == .deepSeek && targetModel == state.activeDeepSeekModel) { return }
+        pendingProviderMode = mode
+        pendingDeepSeekModel = targetModel
+        pendingTaskToOpen = nil
+        // Every real provider/model change restarts Codex. Always confirm instead of
+        // relying solely on the periodically refreshed running-task snapshot.
+        showProviderRestartConfirmation = true
+    }
+
+    private var providerSwitchTargetName: String {
+        guard let mode = pendingProviderMode else { return "目标模型" }
+        switch mode {
+        case .openAI:
+            return "OpenAI 原模型"
+        case .deepSeek:
+            return (pendingDeepSeekModel ?? state.activeDeepSeekModel).displayName
+        }
+    }
+
+    private var providerSwitchConfirmationTitle: String {
+        if pendingTaskToOpen != nil {
+            return "切换到 \(providerSwitchTargetName) 并打开原任务？"
+        }
+        return state.tasks.isEmpty
+            ? "重启 Codex 并切换模型？"
+            : "\(state.tasks.count) 个任务正在进行，仍要切换？"
+    }
+
+    private var providerSwitchConfirmationActionTitle: String {
+        if pendingTaskToOpen != nil { return "切换并打开原任务" }
+        return state.tasks.isEmpty ? "确认切换并重启" : "仍要切换并重启"
+    }
+
+    private var providerSwitchConfirmationMessage: String {
+        if let pendingTaskToOpen {
+            let interruption = state.tasks.isEmpty
+                ? ""
+                : "当前 \(state.tasks.count) 个运行任务的生成或工具调用会被中断。"
+            return "该对话属于 \(pendingTaskToOpen.providerDisplayName)，必须先切换回它的原 Provider 和模型，并完整重启 Codex。\(interruption)对话不会被删除；重启后将直接打开原任务“\(pendingTaskToOpen.title)”，不会新建替代对话。"
+        }
+        if state.tasks.isEmpty {
+            return "切换至 \(providerSwitchTargetName) 需要完整重启 Codex。原任务不会删除，但仍绑定原 Provider；重启后 CodexBar 会打开一个与新模型匹配的新任务。之后点击其他 Provider 的任务可再安全切回。"
+        }
+        return "切换至 \(providerSwitchTargetName) 需要完整重启 Codex。当前生成和工具调用会被中断；原任务不会删除，但只能在它原本的 Provider 下继续。重启后会自动打开匹配的新任务，建议先等待当前任务结束。"
+    }
+
+    private func requestTaskOpen(_ task: ActiveTask) {
+        switch state.taskOpenRoute(for: task) {
+        case .direct:
+            state.openTask(task)
+        case let .switchProvider(mode, model):
+            if mode == .deepSeek, !state.deepSeekKeyConfigured {
+                state.showTaskOpenIssue("打开该 DeepSeek 任务前，需要先配置并验证 DeepSeek API Key。")
+                showDeepSeekKeyConfiguration = true
+                return
+            }
+            pendingProviderMode = mode
+            pendingDeepSeekModel = model
+            pendingTaskToOpen = task
+            showProviderRestartConfirmation = true
+        case let .unsupported(message):
+            state.showTaskOpenIssue(message)
+        }
+    }
+
+    private func performPendingProviderSwitch() {
+        guard let mode = pendingProviderMode else { return }
+        let model = pendingDeepSeekModel
+        let taskToOpen = pendingTaskToOpen
+        pendingProviderMode = nil
+        pendingDeepSeekModel = nil
+        pendingTaskToOpen = nil
+        state.switchProvider(to: mode, model: model, userConfirmed: true, taskToOpen: taskToOpen)
     }
 
     private var taskSection: some View {
@@ -135,18 +338,18 @@ struct DashboardView: View {
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 4)
                     if state.canActivateAutoStopNow {
-                        Button("立即启用") { showAutoStopRestartConfirmation = true }
+                        Button("手动启用") { showAutoStopRestartConfirmation = true }
                             .buttonStyle(.borderless)
                             .fontWeight(.semibold)
                     }
                 }
                 .font(.system(size: 10.5))
                 .foregroundStyle(.orange)
-                .alert("立即启用自动停止？", isPresented: $showAutoStopRestartConfirmation) {
+                .alert("重启 Codex 并启用自动停止？", isPresented: $showAutoStopRestartConfirmation) {
                     Button("取消", role: .cancel) {}
-                    Button("重启 Codex", role: .destructive) { state.activateAutoStopNow() }
+                    Button("确认重启", role: .destructive) { state.activateAutoStop(userConfirmed: true) }
                 } message: {
-                    Text("这会完整退出并重新打开 Codex，当前 \(state.tasks.count) 个运行任务会被中断。也可以取消，等待全部任务结束后自动启用。")
+                    Text("只有点击“确认重启”才会退出并重新打开 Codex，当前 \(state.tasks.count) 个运行任务会被中断。取消后 CodexBar 不会在后台自动执行。")
                 }
             }
             if state.tasks.isEmpty {
@@ -161,7 +364,7 @@ struct DashboardView: View {
                 VStack(spacing: 2) {
                     ForEach(state.tasks) { task in
                         HStack(spacing: 0) {
-                            Button { state.openTask(task) } label: {
+                            Button { requestTaskOpen(task) } label: {
                                 TaskRow(task: task, usage: state.budgetUsage(for: task))
                             }
                             .buttonStyle(.plain)
@@ -265,6 +468,11 @@ private struct TaskRow: View {
                         Image(systemName: "target").font(.system(size: 8))
                         Text("Goal")
                     }
+                    Text(task.providerDisplayName)
+                        .font(.system(size: 8.5, weight: .semibold))
+                        .foregroundStyle(task.providerMode == .deepSeek ? Color.purple : Color.secondary)
+                        .padding(.horizontal, 4).padding(.vertical, 1)
+                        .background(Color.primary.opacity(0.055), in: Capsule())
                     Text(task.folderName).lineLimit(1)
                     Text("·")
                     Text(task.elapsedReferenceDate, style: .relative)
@@ -328,7 +536,108 @@ private struct TaskBudgetMenu: View {
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
-        .help(task.isControllable ? "设置 Token 上限：90% 提醒收尾，100% 自动停止" : "设置后会在任务全部结束时自动重启 Codex 并启用停止能力")
+        .help(task.isControllable ? "设置 Token 上限：90% 提醒收尾，100% 自动停止" : "设置上限后需由你确认重启 Codex；CodexBar 不会自行关闭 Codex")
+    }
+}
+
+private struct DeepSeekKeyConfigurationView: View {
+    @ObservedObject var state: AppState
+    @Environment(\.dismiss) private var dismiss
+    @State private var apiKey = ""
+    @State private var isEditingKey = false
+
+    private var showsKeyEditor: Bool { !state.deepSeekKeyConfigured || isEditingKey }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: "key.horizontal.fill")
+                    .font(.system(size: 22))
+                    .foregroundStyle(Color.accentColor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("DeepSeek API Key")
+                        .font(.system(size: 15, weight: .semibold))
+                    Text(state.deepSeekKeyConfigured ? "已安全保存到本机钥匙串" : "首次切换前需要配置")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if state.deepSeekKeyConfigured {
+                    Label("钥匙串", systemImage: "checkmark.shield.fill")
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .foregroundStyle(.green)
+                }
+            }
+
+            if showsKeyEditor {
+                SecureField("粘贴 sk-…", text: $apiKey)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { if !apiKey.isEmpty { saveAndFinish() } }
+
+                Text("验证成功后会保存并自动关闭此窗口；Key 仅存入本机 macOS 钥匙串，不会写入 Codex 配置、仓库或日志。")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Label("Key 已验证，可用于查询余额和 DeepSeek 模型请求", systemImage: "checkmark.circle.fill")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundStyle(.green)
+                    .padding(.vertical, 2)
+            }
+
+            if let error = state.deepSeekError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.orange)
+                    .lineLimit(3)
+            }
+
+            HStack {
+                if state.deepSeekKeyConfigured && !showsKeyEditor && state.activeProviderMode == .openAI {
+                    Button("删除 Key", role: .destructive) { state.deleteDeepSeekKey() }
+                }
+                Spacer()
+                if state.deepSeekKeyConfigured && !showsKeyEditor {
+                    Button("更换 Key") {
+                        apiKey = ""
+                        isEditingKey = true
+                    }
+                    Button("完成") { dismiss() }
+                        .buttonStyle(.borderedProminent)
+                } else {
+                    if state.deepSeekKeyConfigured {
+                        Button("取消更换") {
+                            apiKey = ""
+                            isEditingKey = false
+                        }
+                    } else {
+                        Button("取消") { dismiss() }
+                    }
+                    Button {
+                        saveAndFinish()
+                    } label: {
+                        if state.isSavingDeepSeekKey {
+                            HStack(spacing: 6) {
+                                ProgressView().controlSize(.small)
+                                Text("正在验证…")
+                            }
+                        } else {
+                            Text(state.deepSeekKeyConfigured ? "验证、更换并完成" : "验证、保存并完成")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || state.isSavingDeepSeekKey)
+                }
+            }
+        }
+        .padding(18)
+        .frame(width: 350)
+    }
+
+    private func saveAndFinish() {
+        state.saveDeepSeekKey(apiKey) { succeeded in
+            if succeeded { dismiss() }
+        }
     }
 }
 

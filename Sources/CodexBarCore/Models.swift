@@ -148,6 +148,8 @@ public struct ActiveTask: Identifiable, Equatable, Sendable, Codable {
     public let activeTurnID: String?
     public let rolloutPath: String?
     public let isControllable: Bool
+    public let modelProvider: String?
+    public let model: String?
 
     public init(
         id: String,
@@ -163,7 +165,9 @@ public struct ActiveTask: Identifiable, Equatable, Sendable, Codable {
         isRunning: Bool = false,
         activeTurnID: String? = nil,
         rolloutPath: String? = nil,
-        isControllable: Bool = false
+        isControllable: Bool = false,
+        modelProvider: String? = nil,
+        model: String? = nil
     ) {
         self.id = id
         self.title = title
@@ -179,6 +183,8 @@ public struct ActiveTask: Identifiable, Equatable, Sendable, Codable {
         self.activeTurnID = activeTurnID
         self.rolloutPath = rolloutPath
         self.isControllable = isControllable
+        self.modelProvider = modelProvider
+        self.model = model
     }
 
     public var folderName: String {
@@ -188,6 +194,55 @@ public struct ActiveTask: Identifiable, Equatable, Sendable, Codable {
 
     public var deepLink: URL? { URL(string: "codex://threads/\(id)") }
     public var elapsedReferenceDate: Date { runStartedAt ?? updatedAt }
+
+    public var providerMode: ModelProviderMode? {
+        switch modelProvider?.lowercased() {
+        case nil, "", "openai": return .openAI
+        case ProviderConfigManager.providerID, "deepseek": return .deepSeek
+        default: return nil
+        }
+    }
+
+    public var providerDisplayName: String {
+        switch providerMode {
+        case .openAI: return "OpenAI"
+        case .deepSeek: return "DeepSeek"
+        case nil: return "其他模型"
+        }
+    }
+}
+
+public enum TaskOpenRoute: Equatable, Sendable {
+    case direct
+    case switchProvider(mode: ModelProviderMode, model: DeepSeekModel?)
+    case unsupported(message: String)
+}
+
+public enum TaskOpenPolicy {
+    public static func route(
+        for task: ActiveTask,
+        activeProvider: ModelProviderMode,
+        activeDeepSeekModel: DeepSeekModel
+    ) -> TaskOpenRoute {
+        guard let taskProvider = task.providerMode else {
+            return .unsupported(message: "无法识别该任务的模型来源，已阻止打开，避免将对话发送到错误的 Provider。")
+        }
+
+        switch taskProvider {
+        case .openAI:
+            return activeProvider == .openAI
+                ? .direct
+                : .switchProvider(mode: .openAI, model: nil)
+        case .deepSeek:
+            guard let modelName = task.model,
+                  let taskModel = DeepSeekModel(rawValue: modelName) else {
+                return .unsupported(message: "无法识别该 DeepSeek 任务使用的具体模型，已阻止打开。")
+            }
+            return activeProvider == .deepSeek && activeDeepSeekModel == taskModel
+                ? .direct
+                : .switchProvider(mode: .deepSeek, model: taskModel)
+        }
+    }
 }
 
 public struct TaskBudget: Equatable, Sendable, Codable {
@@ -233,8 +288,8 @@ public enum AutoStopActivationPolicy {
         hasBudgets && tasks.contains { !$0.isControllable }
     }
 
-    public static func shouldRestartWhenIdle(isPending: Bool, tasks: [ActiveTask]) -> Bool {
-        isPending && tasks.isEmpty
+    public static func mayRestartCodex(userConfirmed: Bool) -> Bool {
+        userConfirmed
     }
 }
 

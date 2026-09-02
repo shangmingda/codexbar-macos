@@ -4,10 +4,66 @@ import Foundation
 @main
 struct Diagnostics {
     static func main() async {
+        if let modelArgument = CommandLine.arguments.first(where: { $0.hasPrefix("--thread-launch-model=") }),
+           let providerArgument = CommandLine.arguments.first(where: { $0.hasPrefix("--thread-launch-provider=") }) {
+            let model = String(modelArgument.dropFirst("--thread-launch-model=".count))
+            let provider = String(providerArgument.dropFirst("--thread-launch-provider=".count))
+            do {
+                let thread = try await CodexThreadLauncher().createThread(
+                    model: model,
+                    cwd: FileManager.default.currentDirectoryPath,
+                    expectedProvider: provider
+                )
+                let data = try JSONSerialization.data(
+                    withJSONObject: ["threadId": thread.id, "modelProvider": thread.modelProvider],
+                    options: [.prettyPrinted, .sortedKeys]
+                )
+                print(String(data: data, encoding: .utf8)!)
+                exit(0)
+            } catch {
+                print(#"{"threadLaunchError":"\#(error.localizedDescription)"}"#)
+                exit(1)
+            }
+        }
+        if CommandLine.arguments.contains("--deepseek-catalog-only") {
+            do {
+                let data = try await DeepSeekClient().fetchOfficialModelCatalog()
+                let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                let models = (object?["models"] as? [[String: Any]])?.compactMap { $0["slug"] as? String } ?? []
+                print(String(data: try JSONSerialization.data(withJSONObject: ["deepSeekModels": models], options: [.prettyPrinted, .sortedKeys]), encoding: .utf8)!)
+                exit(Set(models).isSuperset(of: Set(DeepSeekModel.allCases.map(\.rawValue))) ? 0 : 1)
+            } catch {
+                print(#"{"catalogError":"\#(error.localizedDescription)"}"#)
+                exit(1)
+            }
+        }
+        if CommandLine.arguments.contains("--deepseek-api-models-only") {
+            guard let apiKey = ProcessInfo.processInfo.environment["CODEXBAR_DEEPSEEK_API_KEY"],
+                  !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                print(#"{"apiModelsError":"诊断程序不读取 macOS 钥匙串；如需调用 DeepSeek API，请在当次进程环境中提供 CODEXBAR_DEEPSEEK_API_KEY"}"#)
+                exit(2)
+            }
+            do {
+                let models = try await DeepSeekClient().fetchAvailableModels(apiKey: apiKey).sorted()
+                print(String(data: try JSONSerialization.data(withJSONObject: ["deepSeekAPImodels": models], options: [.prettyPrinted, .sortedKeys]), encoding: .utf8)!)
+                exit(Set(models).isSuperset(of: Set(DeepSeekModel.allCases.map(\.rawValue))) ? 0 : 1)
+            } catch {
+                print(#"{"apiModelsError":"\#(error.localizedDescription)"}"#)
+                exit(1)
+            }
+        }
         let tasksOnly = CommandLine.arguments.contains("--tasks-only")
         let quotaOnly = CommandLine.arguments.contains("--quota-only")
         let controlProbe = CommandLine.arguments.first { $0.hasPrefix("--control-probe=") }
         var output: [String: Any] = ["timestamp": ISO8601DateFormatter().string(from: Date())]
+        do {
+            let config = try await ProviderConfigVerifier().readEffectiveConfig()
+            output["effectiveProvider"] = config["model_provider"] as? String ?? "openai"
+            output["effectiveModel"] = config["model"] as? String ?? "unknown"
+            output["codexBarProviderLease"] = ProviderConfigManager().status().mode.rawValue
+        } catch {
+            output["providerError"] = error.localizedDescription
+        }
         if !tasksOnly { do {
             let rateLimitData = try await RateLimitClient().fetch()
             output["quota"] = rateLimitData.windows.map { [
@@ -39,7 +95,9 @@ struct Diagnostics {
                 "turnTokensUsed": $0.turnTokensUsed,
                 "activeTurnID": $0.activeTurnID as Any,
                 "runStartedAt": $0.runStartedAt.map { ISO8601DateFormatter().string(from: $0) } as Any,
-                "isControllable": $0.isControllable
+                "isControllable": $0.isControllable,
+                "modelProvider": $0.modelProvider as Any,
+                "model": $0.model as Any
             ] }
         } catch { output["taskError"] = error.localizedDescription } }
         if let controlProbe {
@@ -53,6 +111,6 @@ struct Diagnostics {
         }
         let data = try! JSONSerialization.data(withJSONObject: output, options: [.prettyPrinted, .sortedKeys])
         print(String(data: data, encoding: .utf8)!)
-        exit((output["quotaError"] == nil && output["taskError"] == nil && output["controlError"] == nil) ? 0 : 1)
+        exit((output["quotaError"] == nil && output["taskError"] == nil && output["controlError"] == nil && output["providerError"] == nil) ? 0 : 1)
     }
 }

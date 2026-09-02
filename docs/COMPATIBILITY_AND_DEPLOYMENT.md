@@ -4,8 +4,8 @@
 
 - 机器架构：Apple Silicon（arm64）
 - macOS：26.3
-- Codex Desktop：26.707.61608
-- Codex CLI / app-server：0.144.2
+- Codex Desktop：26.810.41047
+- Codex CLI / app-server：0.148.0-alpha.9
 - Swift：6.2.3
 - 安装范围：当前 macOS 用户
 
@@ -30,6 +30,18 @@ CodexBar 启动本机 Codex `app-server --stdio` 并调用 `account/rateLimits/r
 额度窗口根据 `windowDurationMins` 动态分类。当前只返回周窗口时显示周额度；后端恢复 300 分钟窗口时自动增加 5 小时额度。
 
 重置卡读取同一响应中的 `rateLimitResetCredits`。仅展示 `status=available` 的卡，按真实 `expiresAt` 排序；如果后端只返回卡数但未返回明细，界面保留上次成功结果并自动重试，不用“未知”代替真实日期。
+
+DeepSeek 是可选模式，需要能访问 `api.deepseek.com` 与 `cdn.deepseek.com`，并具有有效 API Key 和余额。余额读取官方 `/user/balance`；模型目录从 DeepSeek 官方 Codex 安装脚本的数据段中只读提取、验证后使用，不执行远程脚本。
+
+### 外接模型与回滚
+
+- OpenAI 模式的 `config.toml` 内容与切换前逐字节一致，原模型、推理强度、插件、MCP 与权限配置不会被改写。
+- DeepSeek Flash、Pro 与 `deepseek-v4-flash-vision-exp` 使用官方 Responses API 配置；Vision 实验模型按官方目录启用文本和图片输入。Codex Desktop 在 macOS 的原生模型选择器中可能显示 `Custom`。
+- Key 仅存 macOS 钥匙串；临时 DeepSeek 配置只包含同签名凭据助手的本机路径，不包含明文 Key。
+- 切换前先保存原配置快照，写入后再通过 Codex `config/read` 核验实际 provider 和模型；任何一步失败都回滚 OpenAI。
+- 正常退出由应用完成恢复；异常退出和登录残留由独立 watcher 恢复并重启 Codex。
+- 两类 provider 的历史任务由 Codex 按认证方式分组；切回对应 provider 后重新显示，CodexBar 不删除任务文件。
+- DeepSeek 当前官方目录声明仅支持文本输入；带图片的任务应切回 OpenAI。
 
 ### 任务
 
@@ -69,7 +81,7 @@ CodexBar 启动本机 Codex `app-server --stdio` 并调用 `account/rateLimits/r
 
 任务限额百分比按“从设置限额时起的 Token ÷ 用户设置的 Token 上限”计算，可超过 100%。Codex 返回的周额度 `usedPercent` 是账号级快照，没有 thread 归属；并行任务、其他设备或 ChatGPT 共用额度时无法真实拆分，因此界面不会把它伪装成单任务周额度占比。
 
-安装脚本会执行 `launchctl setenv CODEX_APP_SERVER_USE_LOCAL_DAEMON 1`。如果安装时 Codex Desktop 已运行，旧 `stdio` 进程中的任务不能被共享服务跨进程接管。CodexBar 会持久记录待启用状态，在所有任务结束后自动完整重启一次 Codex；用户也可点击“立即启用”，确认会中断当前所有任务后立刻重启。重启后新任务由共享服务承载，达到阈值时会自动停止。
+安装脚本会执行 `launchctl setenv CODEX_APP_SERVER_USE_LOCAL_DAEMON 1`。如果安装时 Codex Desktop 已运行，旧 `stdio` 进程中的任务不能被共享服务跨进程接管。CodexBar 只显示“手动启用”提示，不持久化重启待办，也不会在空闲、刷新或后台恢复时自行退出 Codex。只有用户当次点击并明确确认后才会完整重启；重启后的新任务由共享服务承载，达到阈值时会自动停止。
 
 ### 重置卡到期前自动使用
 
@@ -87,6 +99,7 @@ CodexBar 启动本机 Codex `app-server --stdio` 并调用 `account/rateLimits/r
 | 环境 | `swift --version` | Swift 6 可用 |
 | 编译 | `swift build` | 无 error / warning |
 | 逻辑测试 | `swift run codexbar-selftest` | 全部测试通过 |
+| 模型事务 | `swift run codexbar-selftest` | Flash/Pro/Vision、官方目录解析、逐字节恢复、无原配置恢复全部通过 |
 | 本机数据 | `swift run codexbar-diagnostics` | 返回额度和任务 JSON |
 | 安装 | `./scripts/install.sh` | 输出 `Installed` |
 | 签名 | `codesign --verify --deep --strict ~/Applications/CodexBar.app` | 退出码 0 |
@@ -105,6 +118,8 @@ CodexBar 启动本机 Codex `app-server --stdio` 并调用 `account/rateLimits/r
 5. 将 Codex 原始 `rateLimitResetCredits` 与诊断输出逐项比较卡 ID、状态和到期时间。
 6. 连续和并发运行 `--tasks-only`，确认没有 `taskError` 或无效 JSON。
 7. 在隔离 `CODEX_HOME` 启动共享 daemon：客户端 A 创建长任务，客户端 B 调用 `turn/interrupt`，确认最终 turn 状态为 `interrupted`。
+8. 在临时配置目录依次执行 OpenAI → Flash → Pro → OpenAI，并对恢复前后配置做 SHA-256 比较。
+9. DeepSeek 模式下分别验证正常退出与强制终止 CodexBar，确认 watcher 清除租约、恢复原配置并重启 Codex。
 
 ## 已知限制
 
@@ -114,3 +129,4 @@ CodexBar 启动本机 Codex `app-server --stdio` 并调用 `account/rateLimits/r
 - Codex CLI 中未被桌面版加载的普通任务目前不计入桌面任务数。
 - 自动停止以 Codex 已结算并写入 rollout 的 Token 事件为准，可能比阈值多一个模型步骤；不能把全局周额度百分比可靠归因给单个并行任务。
 - 重置卡只能在 Codex 后端认为当前额度窗口可重置时消耗；返回 `nothingToReset` 时卡片仍保留。Mac 在整段提前窗口内关机或休眠时无法补用已经过期的卡。
+- DeepSeek 余额和模型可用性取决于其官方 API；断网、Key 无效或余额不足时切换会失败并停留/回滚到 OpenAI。

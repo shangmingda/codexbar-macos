@@ -32,7 +32,7 @@ public final class RateLimitClient {
         return try await withCheckedThrowingContinuation { continuation in
             let session = RateLimitRequestSession(continuation: continuation)
             session.process.executableURL = executableURL
-            session.process.arguments = ["app-server", "--stdio"]
+            session.process.arguments = Self.openAIAppServerArguments
             session.process.standardInput = session.input
             session.process.standardOutput = session.output
             session.process.standardError = session.errors
@@ -71,7 +71,7 @@ public final class RateLimitClient {
         return try await withCheckedThrowingContinuation { continuation in
             let session = ResetCreditConsumeSession(continuation: continuation)
             session.process.executableURL = executableURL
-            session.process.arguments = ["app-server", "--stdio"]
+            session.process.arguments = Self.openAIAppServerArguments
             session.process.standardInput = session.input
             session.process.standardOutput = session.output
             session.process.standardError = session.errors
@@ -120,12 +120,30 @@ public final class RateLimitClient {
             return .failure(RateLimitClientError.malformedResponse)
         }
 
-        var snapshots: [[String: Any]] = []
-        if let byID = result["rateLimitsByLimitId"] as? [String: Any] {
-            snapshots = byID.values.compactMap { $0 as? [String: Any] }
-        }
-        if snapshots.isEmpty, let legacy = result["rateLimits"] as? [String: Any] {
-            snapshots = [legacy]
+        // `rateLimitsByLimitId` can contain independent products such as
+        // `base_model_inference` (gpt-reserve). Its weekly window is not the
+        // Codex weekly quota. Never merge products by duration or rely on
+        // dictionary order; prefer the canonical main snapshot, then exact
+        // `codex`, and only then a deterministic best-effort fallback.
+        let snapshots: [[String: Any]]
+        if let main = result["rateLimits"] as? [String: Any] {
+            snapshots = [main]
+        } else if let byID = result["rateLimitsByLimitId"] as? [String: Any] {
+            let candidates = byID.compactMap { key, value -> (String, [String: Any])? in
+                guard let snapshot = value as? [String: Any] else { return nil }
+                return (key, snapshot)
+            }
+            if let codex = candidates.first(where: { key, snapshot in
+                key.lowercased() == "codex" || (snapshot["limitId"] as? String)?.lowercased() == "codex"
+            })?.1 {
+                snapshots = [codex]
+            } else if let fallback = candidates.sorted(by: Self.isPreferredRateLimitSnapshot).first?.1 {
+                snapshots = [fallback]
+            } else {
+                snapshots = []
+            }
+        } else {
+            snapshots = []
         }
 
         var windows: [QuotaWindow] = []
@@ -176,6 +194,30 @@ public final class RateLimitClient {
             resetCreditDetailsComplete: detailsComplete
         ))
     }
+
+    private static func isPreferredRateLimitSnapshot(
+        _ lhs: (String, [String: Any]),
+        _ rhs: (String, [String: Any])
+    ) -> Bool {
+        func score(_ candidate: (String, [String: Any])) -> Int {
+            let windows = ["primary", "secondary"].compactMap { candidate.1[$0] as? [String: Any] }
+            let durations = Set(windows.compactMap { ($0["windowDurationMins"] as? NSNumber)?.intValue })
+            var value = windows.count * 10
+            if durations.contains(300) { value += 20 }
+            if durations.contains(10_080) { value += 20 }
+            if durations.contains(300), durations.contains(10_080) { value += 50 }
+            return value
+        }
+        let lhsScore = score(lhs)
+        let rhsScore = score(rhs)
+        return lhsScore == rhsScore ? lhs.0 < rhs.0 : lhsScore > rhsScore
+    }
+
+    private static let openAIAppServerArguments = [
+        "app-server", "--stdio",
+        "-c", #"model_provider="openai""#,
+        "-c", #"forced_login_method="chatgpt""#
+    ]
 
     public static func parseConsumeResponse(_ data: Data) -> Result<ResetCreditConsumeOutcome, Error>? {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

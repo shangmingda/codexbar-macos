@@ -19,16 +19,31 @@ final class AppState: ObservableObject {
     @Published private(set) var lastUpdated: Date?
     @Published private(set) var autoStopActivationPending = false
     @Published private(set) var controlRestartInFlight = false
+    @Published private(set) var providerStatus = ProviderSwitchStatus(mode: .openAI)
+    @Published private(set) var deepSeekBalance: DeepSeekBalance?
+    @Published private(set) var deepSeekKeyConfigured = false
+    @Published private(set) var deepSeekError: String?
+    @Published private(set) var providerNotice: String?
+    @Published private(set) var isProviderSwitching = false
+    @Published private(set) var isSavingDeepSeekKey = false
 
     private let rateClient = RateLimitClient()
     private let taskStore = TaskStore()
     private let budgetStore = TaskBudgetStore()
     private let resetCreditAutoUseStore = ResetCreditAutoUseStore()
     private let controlClient = AppServerControlClient()
+    private let deepSeekClient = DeepSeekClient()
+    private let credentialStore = DeepSeekCredentialStore()
+    private let providerManager = ProviderConfigManager()
+    private let providerVerifier = ProviderConfigVerifier()
+    private let codexProcessController = CodexProcessController()
+    private let codexThreadLauncher = CodexThreadLauncher()
     private var timer: Timer?
+    private var providerLeaseTimer: Timer?
     private var tick = 0
     private var taskRefreshInFlight = false
     private var quotaRefreshInFlight = false
+    private var deepSeekRefreshInFlight = false
     private var budgetRefreshInFlight = false
     private var warningInFlight = Set<String>()
     private var lastWarningAttempt: [String: Date] = [:]
@@ -36,15 +51,75 @@ final class AppState: ObservableObject {
     private var lastInterruptAttempt: [String: Date] = [:]
     private var resetCreditAutoUseRecords: [String: ResetCreditAutoUseRecord] = [:]
     private var resetCreditConsumeInFlight = false
+    private var deepSeekSessionAPIKey: String?
     private let activationPendingKey = "CodexBarAutoStopActivationPending"
     private let autoUseResetCreditsKey = "CodexBarAutoUseResetCreditsEnabled"
     private let logger = Logger(subsystem: "com.smd.codexbar", category: "refresh")
+    private var needsStartupCodexRecovery = false
 
-    var statusLines: [String] { StatusTitleFormatter.lines(windows: quotas, taskCount: tasks.count) }
+    var statusLines: [String] {
+        if providerStatus.mode == .deepSeek {
+            let balance = deepSeekBalance?.balances.first?.formattedTotal ?? "余额 --"
+            var first = "DS \(providerStatus.deepSeekModel.shortName) · \(balance)"
+            if !tasks.isEmpty { first = "\(tasks.count)项 · " + first }
+            return [first]
+        }
+        return StatusTitleFormatter.lines(windows: quotas, taskCount: tasks.count)
+    }
     var canActivateAutoStopNow: Bool { autoStopActivationPending && !controlRestartInFlight }
+    var activeProviderMode: ModelProviderMode { providerStatus.mode }
+    var activeDeepSeekModel: DeepSeekModel { providerStatus.deepSeekModel }
+    var needsProviderRollbackOnExit: Bool { providerManager.hasActiveTransaction() }
 
-    init() {
-        autoStopActivationPending = UserDefaults.standard.bool(forKey: activationPendingKey)
+    func applyDeepSeekPreviewState() {
+        providerStatus = ProviderSwitchStatus(mode: .deepSeek, deepSeekModel: .flash, activatedAt: Date())
+        deepSeekKeyConfigured = true
+        deepSeekBalance = DeepSeekBalance(
+            isAvailable: true,
+            balances: [DeepSeekCurrencyBalance(currency: "CNY", total: Decimal(string: "110.25")!, granted: 10.25, toppedUp: 100)]
+        )
+        tasks = [
+            ActiveTask(
+                id: "preview-openai-thread",
+                title: "OpenAI 原对话：跨模型切换验证",
+                objective: "",
+                cwd: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop/codex工作区").path,
+                tokensUsed: 796_100,
+                turnTokensUsed: 18_400,
+                timeUsedSeconds: 49,
+                updatedAt: Date().addingTimeInterval(-49),
+                runStartedAt: Date().addingTimeInterval(-49),
+                isRunning: true,
+                modelProvider: "openai",
+                model: "gpt-5.6-sol"
+            )
+        ]
+        providerNotice = "预览：DeepSeek 模式已启用，退出后自动恢复 OpenAI"
+    }
+
+    init(previewMode: Bool = false) {
+        // UI previews must never touch the real Keychain or provider transaction.
+        // The caller applies deterministic sample state immediately after init.
+        if previewMode { return }
+
+        deepSeekKeyConfigured = credentialStore.hasKey()
+        if providerManager.hasActiveTransaction() {
+            do {
+                try providerManager.restore()
+                providerNotice = "检测到上次未完成的 DeepSeek 租约，已恢复 OpenAI 原配置"
+                needsStartupCodexRecovery = true
+            } catch {
+                providerNotice = "自动恢复 OpenAI 配置失败：\(error.localizedDescription)"
+            }
+        }
+        providerStatus = providerManager.status()
+        // Older builds persisted an idle-restart request. A stale value could later
+        // terminate Codex after a transient empty task refresh, without a fresh click.
+        // Always discard it during migration and require an explicit confirmation.
+        if UserDefaults.standard.object(forKey: activationPendingKey) != nil {
+            UserDefaults.standard.removeObject(forKey: activationPendingKey)
+            budgetNotice = "已取消旧版自动重启计划；CodexBar 不会自行关闭 Codex"
+        }
         autoUseResetCreditsEnabled = UserDefaults.standard.bool(forKey: autoUseResetCreditsKey)
         do {
             budgets = try budgetStore.load()
@@ -60,6 +135,15 @@ final class AppState: ObservableObject {
 
     func start() {
         refreshAll()
+        if DeepSeekBackgroundRefreshPolicy.shouldRefresh(
+            hasKey: deepSeekKeyConfigured,
+            activeProvider: providerStatus.mode
+        ) { refreshDeepSeekBalance() }
+        if needsStartupCodexRecovery {
+            needsStartupCodexRecovery = false
+            codexProcessController.reloadSharedAppServer()
+            providerNotice = "OpenAI 配置已恢复；为避免中断任务，CodexBar 未自动退出 Codex，请在方便时手动重启"
+        }
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             Task { @MainActor in
@@ -71,6 +155,13 @@ final class AppState: ObservableObject {
                     self.refreshBudgetUsage()
                 }
                 if self.tick % 20 == 0 { self.refreshQuota() }
+                if self.tick % 20 == 0,
+                   DeepSeekBackgroundRefreshPolicy.shouldRefresh(
+                    hasKey: self.deepSeekKeyConfigured,
+                    activeProvider: self.providerStatus.mode
+                   ) {
+                    self.refreshDeepSeekBalance()
+                }
             }
         }
         RunLoop.main.add(timer!, forMode: .common)
@@ -79,6 +170,10 @@ final class AppState: ObservableObject {
     func refreshAll() {
         refreshTasks()
         refreshQuota()
+        if DeepSeekBackgroundRefreshPolicy.shouldRefresh(
+            hasKey: deepSeekKeyConfigured,
+            activeProvider: providerStatus.mode
+        ) { refreshDeepSeekBalance() }
     }
 
     func refreshTasks() {
@@ -105,7 +200,6 @@ final class AppState: ObservableObject {
                     lastUpdated = Date()
                     updateAutoStopActivationState()
                     evaluateBudgets()
-                    activateAutoStopWhenIdle()
                     return
                 } catch {
                     finalError = error
@@ -170,7 +264,7 @@ final class AppState: ObservableObject {
     }
 
     private func updateRefreshingState() {
-        isRefreshing = taskRefreshInFlight || quotaRefreshInFlight
+        isRefreshing = taskRefreshInFlight || quotaRefreshInFlight || deepSeekRefreshInFlight || isProviderSwitching
     }
 
     func setAutoUseResetCreditsEnabled(_ enabled: Bool) {
@@ -261,7 +355,7 @@ final class AppState: ObservableObject {
             budgetNotice = "已为“\(shortTitle(task.title))”设置 \(TokenFormatter.compact(limitTokens)) Token 上限"
         } else {
             scheduleAutoStopActivation()
-            budgetNotice = "上限已保存；任务全部结束后将自动重启 Codex 并启用自动停止"
+            budgetNotice = "上限已保存；如需自动停止，请由你确认后手动重启 Codex"
         }
         evaluateBudgets()
     }
@@ -314,7 +408,7 @@ final class AppState: ObservableObject {
 
             guard task.isControllable else {
                 scheduleAutoStopActivation()
-                budgetNotice = "“\(shortTitle(task.title))”已超限；当前任务无法迁移，任务结束后将自动启用停止能力"
+                budgetNotice = "“\(shortTitle(task.title))”已超限；CodexBar 未关闭 Codex，需你确认后手动启用停止能力"
                 continue
             }
             if let lastAttempt = lastInterruptAttempt[task.id], Date().timeIntervalSince(lastAttempt) < 8 { continue }
@@ -371,39 +465,39 @@ final class AppState: ObservableObject {
         "\(threadID):\(turnID)"
     }
 
-    func activateAutoStopNow() {
+    func activateAutoStop(userConfirmed: Bool) {
+        guard AutoStopActivationPolicy.mayRestartCodex(userConfirmed: userConfirmed) else {
+            budgetNotice = "已取消启用；CodexBar 不会自行关闭 Codex"
+            return
+        }
         scheduleAutoStopActivation()
         restartCodexForAutoStop()
     }
 
     private func updateAutoStopActivationState() {
-        if AutoStopActivationPolicy.shouldSchedule(hasBudgets: !budgets.isEmpty, tasks: tasks) {
+        let budgetedTasks = tasks.filter { budgets[$0.id] != nil }
+        if AutoStopActivationPolicy.shouldSchedule(hasBudgets: !budgetedTasks.isEmpty, tasks: budgetedTasks) {
             scheduleAutoStopActivation()
             if budgetNotice == nil {
-                budgetNotice = "自动停止待启用；所有任务结束后将自动重启 Codex"
+                budgetNotice = "自动停止需手动启用；CodexBar 不会自行重启 Codex"
             }
-        } else if autoStopActivationPending, !tasks.isEmpty, tasks.allSatisfy(\.isControllable) {
+        } else if autoStopActivationPending {
             clearAutoStopActivationPending()
-            budgetNotice = "自动停止已启用；任务达到上限后会自动中断"
+            if !budgetedTasks.isEmpty, budgetedTasks.allSatisfy(\.isControllable) {
+                budgetNotice = "自动停止已启用；任务达到上限后会自动中断"
+            }
         }
     }
 
     private func scheduleAutoStopActivation() {
         autoStopActivationPending = true
-        UserDefaults.standard.set(true, forKey: activationPendingKey)
+        // Never persist a request capable of terminating Codex across launches.
+        UserDefaults.standard.removeObject(forKey: activationPendingKey)
     }
 
     private func clearAutoStopActivationPending() {
         autoStopActivationPending = false
         UserDefaults.standard.removeObject(forKey: activationPendingKey)
-    }
-
-    private func activateAutoStopWhenIdle() {
-        guard AutoStopActivationPolicy.shouldRestartWhenIdle(
-            isPending: autoStopActivationPending,
-            tasks: tasks
-        ) else { return }
-        restartCodexForAutoStop()
     }
 
     private func restartCodexForAutoStop() {
@@ -468,9 +562,295 @@ final class AppState: ObservableObject {
         return firstLine.count > 20 ? String(firstLine.prefix(20)) + "…" : firstLine
     }
 
+    func taskOpenRoute(for task: ActiveTask) -> TaskOpenRoute {
+        TaskOpenPolicy.route(
+            for: task,
+            activeProvider: providerStatus.mode,
+            activeDeepSeekModel: providerStatus.deepSeekModel
+        )
+    }
+
+    func showTaskOpenIssue(_ message: String) {
+        providerNotice = message
+        NSSound.beep()
+    }
+
     func openTask(_ task: ActiveTask) {
+        guard taskOpenRoute(for: task) == .direct else {
+            showTaskOpenIssue("该任务需要先切换到它原本的 Provider 和模型后才能安全打开。")
+            return
+        }
         guard let url = task.deepLink else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    func refreshDeepSeekBalance() {
+        guard deepSeekKeyConfigured,
+              providerStatus.mode == .deepSeek,
+              let apiKey = deepSeekSessionAPIKey,
+              !deepSeekRefreshInFlight else { return }
+        deepSeekRefreshInFlight = true
+        updateRefreshingState()
+        Task {
+            defer {
+                deepSeekRefreshInFlight = false
+                updateRefreshingState()
+            }
+            do {
+                deepSeekBalance = try await deepSeekClient.fetchBalance(apiKey: apiKey)
+                deepSeekError = nil
+                lastUpdated = Date()
+            } catch {
+                deepSeekError = error.localizedDescription
+            }
+        }
+    }
+
+    func saveDeepSeekKey(_ key: String, completion: ((Bool) -> Void)? = nil) {
+        guard !isSavingDeepSeekKey else {
+            completion?(false)
+            return
+        }
+        let normalized = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            deepSeekError = "请输入 DeepSeek API Key"
+            completion?(false)
+            return
+        }
+        isSavingDeepSeekKey = true
+        deepSeekError = nil
+        Task {
+            defer { isSavingDeepSeekKey = false }
+            do {
+                let balance = try await deepSeekClient.fetchBalance(apiKey: normalized)
+                try credentialStore.save(normalized)
+                deepSeekSessionAPIKey = normalized
+                deepSeekKeyConfigured = true
+                deepSeekBalance = balance
+                providerNotice = "DeepSeek Key 已验证并安全保存到 macOS 钥匙串"
+                lastUpdated = Date()
+                completion?(true)
+            } catch {
+                deepSeekError = error.localizedDescription
+                completion?(false)
+            }
+        }
+    }
+
+    func deleteDeepSeekKey() {
+        guard providerStatus.mode == .openAI else {
+            deepSeekError = "请先切回 OpenAI，再删除 DeepSeek Key"
+            return
+        }
+        do {
+            try credentialStore.delete()
+            deepSeekSessionAPIKey = nil
+            deepSeekKeyConfigured = false
+            deepSeekBalance = nil
+            deepSeekError = nil
+            providerNotice = "DeepSeek Key 已从 macOS 钥匙串删除"
+        } catch {
+            deepSeekError = error.localizedDescription
+        }
+    }
+
+    func switchProvider(
+        to mode: ModelProviderMode,
+        model: DeepSeekModel? = nil,
+        userConfirmed: Bool,
+        taskToOpen: ActiveTask? = nil
+    ) {
+        guard !isProviderSwitching else { return }
+        guard AutoStopActivationPolicy.mayRestartCodex(userConfirmed: userConfirmed) else {
+            providerNotice = "已取消切换；CodexBar 不会自行关闭 Codex"
+            return
+        }
+        let targetModel = model ?? providerStatus.deepSeekModel
+        if providerStatus.mode == mode, mode == .openAI {
+            if let taskToOpen { openTask(taskToOpen) }
+            return
+        }
+        if providerStatus.mode == .deepSeek, mode == .deepSeek, providerStatus.deepSeekModel == targetModel {
+            if let taskToOpen { openTask(taskToOpen) }
+            return
+        }
+        if mode == .deepSeek, !deepSeekKeyConfigured {
+            deepSeekError = "请先配置并验证 DeepSeek API Key"
+            return
+        }
+
+        isProviderSwitching = true
+        updateRefreshingState()
+        let preferredCWD = taskToOpen?.cwd ?? tasks.first(where: \.isRunning)?.cwd ?? tasks.first?.cwd
+        providerNotice = mode == .deepSeek
+            ? "正在启用 \(targetModel.displayName) 并重启 Codex…"
+            : "正在恢复 OpenAI 原配置并重启 Codex…"
+        Task {
+            defer {
+                isProviderSwitching = false
+                updateRefreshingState()
+            }
+            do {
+                switch mode {
+                case .deepSeek:
+                    guard let apiKey = try (deepSeekSessionAPIKey ?? credentialStore.load()) else {
+                        throw ProviderConfigError.invalidAPIKey
+                    }
+                    deepSeekSessionAPIKey = apiKey
+                    _ = try await deepSeekClient.fetchBalance(apiKey: apiKey)
+                    let availableModels = try await deepSeekClient.fetchAvailableModels(apiKey: apiKey)
+                    guard availableModels.contains(targetModel.rawValue) else {
+                        throw DeepSeekClientError.modelUnavailable(targetModel.rawValue)
+                    }
+                    let catalog = try await deepSeekClient.fetchOfficialModelCatalog()
+                    providerStatus = try providerManager.activateDeepSeek(
+                        model: targetModel,
+                        catalogData: catalog,
+                        apiKey: apiKey
+                    )
+                    try await providerVerifier.verify(mode: .deepSeek, model: targetModel)
+                    startProviderLeaseHeartbeat()
+                    try await codexProcessController.restartCodex(userConfirmed: userConfirmed, openWhenNotRunning: true)
+                    if let taskToOpen {
+                        do {
+                            try await openTaskAfterProviderSwitch(taskToOpen, mode: .deepSeek, model: targetModel)
+                            providerNotice = "已切换到 \(targetModel.displayName) 并打开原任务“\(shortTitle(taskToOpen.title))”"
+                        } catch {
+                            providerNotice = "已切换到 \(targetModel.displayName)，但原任务打开失败；请再点击该任务（\(error.localizedDescription)）"
+                        }
+                    } else {
+                        do {
+                            try await createAndOpenMatchingTask(mode: .deepSeek, model: targetModel, cwd: preferredCWD)
+                            providerNotice = "已切换到 \(targetModel.displayName) 并打开新任务"
+                        } catch {
+                            providerNotice = "已切换到 \(targetModel.displayName)；请在 Codex 新建任务（自动新建失败：\(error.localizedDescription)）"
+                        }
+                    }
+                    refreshDeepSeekBalance()
+                case .openAI:
+                    providerStatus = try providerManager.restore()
+                    stopProviderLeaseHeartbeat()
+                    try await providerVerifier.verify(mode: .openAI)
+                    try await codexProcessController.restartCodex(userConfirmed: userConfirmed, openWhenNotRunning: true)
+                    if let taskToOpen {
+                        do {
+                            try await openTaskAfterProviderSwitch(taskToOpen, mode: .openAI, model: nil)
+                            providerNotice = "已恢复 OpenAI 原配置并打开原任务“\(shortTitle(taskToOpen.title))”"
+                        } catch {
+                            providerNotice = "已恢复 OpenAI 原配置，但原任务打开失败；请再点击该任务（\(error.localizedDescription)）"
+                        }
+                    } else {
+                        do {
+                            try await createAndOpenMatchingTask(mode: .openAI, model: targetModel, cwd: preferredCWD)
+                            providerNotice = "已原样恢复 OpenAI 配置和原模型参数，并打开新的 OpenAI 任务"
+                        } catch {
+                            providerNotice = "已原样恢复 OpenAI 配置和原模型参数；请在 Codex 新建 OpenAI 任务（自动新建失败：\(error.localizedDescription)）"
+                        }
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 1_200_000_000)
+                refreshTasks()
+                refreshQuota()
+            } catch {
+                logger.error("Provider switch failed: \(error.localizedDescription, privacy: .public)")
+                if providerManager.hasActiveTransaction() {
+                    do {
+                        providerStatus = try providerManager.restore()
+                        stopProviderLeaseHeartbeat()
+                        try await codexProcessController.restartCodex(userConfirmed: userConfirmed, openWhenNotRunning: true)
+                        providerNotice = "切换失败，已自动回滚 OpenAI：\(error.localizedDescription)"
+                    } catch let rollbackError {
+                        providerNotice = "切换失败且自动回滚未完成：\(rollbackError.localizedDescription)"
+                    }
+                } else {
+                    providerStatus = providerManager.status()
+                    providerNotice = "模型切换失败：\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    private func openTaskAfterProviderSwitch(
+        _ task: ActiveTask,
+        mode: ModelProviderMode,
+        model: DeepSeekModel?
+    ) async throws {
+        guard task.providerMode == mode else { throw CodexThreadLauncherError.malformedResponse }
+        if mode == .deepSeek {
+            guard let model, task.model == model.rawValue else {
+                throw CodexThreadLauncherError.malformedResponse
+            }
+        }
+        guard let url = task.deepLink else { throw CodexThreadLauncherError.malformedResponse }
+        // Give the freshly launched Codex app time to register its deep-link handler.
+        try? await Task.sleep(nanoseconds: 900_000_000)
+        guard NSWorkspace.shared.open(url) else {
+            throw CodexThreadLauncherError.malformedResponse
+        }
+    }
+
+    private func createAndOpenMatchingTask(mode: ModelProviderMode, model: DeepSeekModel, cwd: String?) async throws {
+        let expectedProvider: String
+        let modelName: String
+        switch mode {
+        case .deepSeek:
+            expectedProvider = ProviderConfigManager.providerID
+            modelName = model.rawValue
+        case .openAI:
+            expectedProvider = "openai"
+            let config = try await providerVerifier.readEffectiveConfig()
+            guard let restoredModel = config["model"] as? String, !restoredModel.isEmpty else {
+                throw CodexThreadLauncherError.malformedResponse
+            }
+            modelName = restoredModel
+        }
+        let validCWD = cwd.flatMap { value in
+            var isDirectory: ObjCBool = false
+            return FileManager.default.fileExists(atPath: value, isDirectory: &isDirectory) && isDirectory.boolValue ? value : nil
+        } ?? FileManager.default.homeDirectoryForCurrentUser.path
+        let thread = try await codexThreadLauncher.createThread(
+            model: modelName,
+            cwd: validCWD,
+            expectedProvider: expectedProvider
+        )
+        guard let url = thread.deepLink else { throw CodexThreadLauncherError.malformedResponse }
+        try? await Task.sleep(nanoseconds: 350_000_000)
+        NSWorkspace.shared.open(url)
+    }
+
+    func prepareForTermination() async -> Bool {
+        guard providerManager.hasActiveTransaction() else { return true }
+        do {
+            providerStatus = try providerManager.restore()
+            stopProviderLeaseHeartbeat()
+            do {
+                try await providerVerifier.verify(mode: .openAI)
+                codexProcessController.reloadSharedAppServer()
+                providerNotice = "OpenAI 配置已恢复；CodexBar 未自动退出 Codex，请在方便时手动重启使配置生效"
+            } catch {
+                logger.error("Codex refresh after graceful rollback failed: \(error.localizedDescription, privacy: .public)")
+            }
+            return true
+        } catch {
+            providerNotice = "无法安全退出：OpenAI 配置恢复失败（\(error.localizedDescription)）"
+            logger.fault("Provider rollback on exit failed: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
+
+    private func startProviderLeaseHeartbeat() {
+        providerLeaseTimer?.invalidate()
+        try? providerManager.heartbeat()
+        providerLeaseTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            try? self.providerManager.heartbeat()
+        }
+        if let providerLeaseTimer { RunLoop.main.add(providerLeaseTimer, forMode: .common) }
+    }
+
+    private func stopProviderLeaseHeartbeat() {
+        providerLeaseTimer?.invalidate()
+        providerLeaseTimer = nil
     }
 
     func openCodex() {

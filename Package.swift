@@ -12,7 +12,13 @@ let package = Package(
         .executable(name: "codexbar-watcher", targets: ["CodexBarWatcher"])
     ],
     targets: [
-        .target(name: "CodexBarCore"),
+        .target(
+            name: "CodexBarCore",
+            linkerSettings: [
+                .linkedFramework("LocalAuthentication"),
+                .linkedFramework("Security")
+            ]
+        ),
         .executableTarget(name: "CodexBar", dependencies: ["CodexBarCore"]),
         .executableTarget(name: "CodexBarDiagnostics", dependencies: ["CodexBarCore"]),
         .executableTarget(name: "CodexBarSelfTests", dependencies: ["CodexBarCore"]),
