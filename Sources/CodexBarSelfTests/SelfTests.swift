@@ -115,6 +115,17 @@ struct SelfTests {
         try check(tasks[0].model == DeepSeekModel.pro.rawValue, "任务模型归属解析")
         let openAITask = ActiveTask(id: "openai", title: "原生任务", objective: "", cwd: "/tmp", tokensUsed: 0, timeUsedSeconds: 0, updatedAt: Date(), modelProvider: "openai", model: "gpt-5.6-sol")
         try check(openAITask.providerMode == .openAI, "OpenAI 任务 Provider 识别")
+        let openAIHTTPTask = ActiveTask(id: "openai-http", title: "HTTP 原生任务", objective: "", cwd: "/tmp", tokensUsed: 0, timeUsedSeconds: 0, updatedAt: Date(), modelProvider: "openai-http", model: "gpt-5.6-sol")
+        try check(openAIHTTPTask.providerMode == .openAI, "openai-http Provider 显示为 OpenAI")
+        try check(openAIHTTPTask.providerDisplayName == "OpenAI", "openai-http Provider 不显示为未知模型")
+        try check(
+            TaskOpenPolicy.route(for: openAIHTTPTask, activeProvider: .openAI, activeDeepSeekModel: .flash) == .direct,
+            "openai-http 任务在 OpenAI 模式直接打开"
+        )
+        try check(
+            TaskOpenPolicy.route(for: openAIHTTPTask, activeProvider: .deepSeek, activeDeepSeekModel: .flash) == .switchProvider(mode: .openAI, model: nil),
+            "openai-http 任务从 DeepSeek 安全切回 OpenAI"
+        )
         try check(
             TaskOpenPolicy.route(for: openAITask, activeProvider: .openAI, activeDeepSeekModel: .flash) == .direct,
             "OpenAI 模式直接打开 OpenAI 原任务"

@@ -16,6 +16,7 @@ CodexBar 是一个原生 macOS 菜单栏工具，用于查看当前 Codex 账号
 - 面板会标明已识别的单/双额度模式；任务列表保持在主操作区，重置卡以“数量 + 到期日 + 自动使用开关”紧凑展示，点击后再查看逐卡详情与下一次自动使用时间。明细不完整时自动重试，不显示伪造的“未知日期”。
 - 可明确开启“到期前 1 小时自动使用重置卡”；真实兑换、最早到期优先，并用稳定幂等键避免重复消耗。
 - 合并统计 Codex 桌面版普通运行任务与 `active` Goal，同一线程只计一次。
+- 兼容 Codex 的 `openai` 与 `openai-http` 原生任务标识，任务列表均正确显示为 OpenAI。
 - 运行秒数取自当前 turn 的真实启动时间，点击跳转、刷新或打开 Codex 不会重新计时。
 - 每个运行任务始终展示当前 turn 的真实 Token 消耗，未运行的 active Goal 展示线程累计 Token；设置任务上限后，同时展示从设置时起的用量、上限和精确百分比。
 - 每个任务通过可视化浮层独立设置 25K～5M Token 上限，提供 8 档预设、实时进度环与精确百分比；从设置时的真实累计量开始计算，使用到 90% 时自动发送收尾提示，达到上限后只中断对应任务，不影响其他任务。
@@ -35,7 +36,7 @@ CodexBar 是一个原生 macOS 菜单栏工具，用于查看当前 Codex 账号
 | Intel Mac | 源码可构建，尚未实机验证 |
 | Codex Desktop | 需要已安装并登录当前用户账号 |
 | Codex 额度模式 | 自动识别单窗口或双窗口 |
-| DeepSeek Codex 集成 | V4 Flash / V4 Pro，Responses API；需要有效 API Key 和可用余额 |
+| DeepSeek Codex 集成 | V4 Flash / V4 Pro / V4 Vision，Responses API；需要有效 API Key 和可用余额 |
 | 多 macOS 用户 | 只读取当前登录用户的 `CODEX_HOME` / `~/.codex` |
 | 纯 Codex CLI 任务 | 不纳入桌面版普通运行任务统计 |
 

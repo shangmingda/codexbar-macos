@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.8
+
+- 兼容 Codex 新写入的 `openai-http` 任务 Provider 标识，任务列表统一显示为 OpenAI，不再误报未知模型。
+- `openai-http` 任务沿用 OpenAI 原任务的安全打开策略：OpenAI 模式直接跳转，DeepSeek 模式下明确确认后切回 OpenAI。
+- 本次兼容只规范任务元数据，不结束、重启或修改正在运行的 Codex 任务。
+
 ## 1.4.7
 
 - 修复周额度偶发或持续错误显示 100% 的问题。

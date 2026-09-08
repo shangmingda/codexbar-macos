@@ -207,8 +207,8 @@ public struct ActiveTask: Identifiable, Equatable, Sendable, Codable {
     public var elapsedReferenceDate: Date { runStartedAt ?? updatedAt }
 
     public var providerMode: ModelProviderMode? {
-        switch modelProvider?.lowercased() {
-        case nil, "", "openai": return .openAI
+        switch modelProvider?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case nil, "", "openai", "openai-http": return .openAI
         case ProviderConfigManager.providerID, "deepseek": return .deepSeek
         default: return nil
         }
