@@ -33,7 +33,7 @@ public final class ProviderConfigVerifier: @unchecked Sendable {
         let actualModel = config["model"] as? String ?? ""
         switch mode {
         case .openAI:
-            guard provider == "openai" || provider.isEmpty else {
+            guard provider == "openai" || provider == "openai-http" || provider.isEmpty else {
                 throw ProviderVerificationError.mismatch(expected: "openai", actual: provider)
             }
         case .deepSeek:

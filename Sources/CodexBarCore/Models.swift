@@ -209,7 +209,7 @@ public struct ActiveTask: Identifiable, Equatable, Sendable, Codable {
     public var providerMode: ModelProviderMode? {
         switch modelProvider?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
         case nil, "", "openai", "openai-http": return .openAI
-        case ProviderConfigManager.providerID, "deepseek": return .deepSeek
+        case ProviderConfigManager.providerID, ProviderConfigManager.legacyProviderID, "deepseek": return .deepSeek
         default: return nil
         }
     }
@@ -220,6 +220,47 @@ public struct ActiveTask: Identifiable, Equatable, Sendable, Codable {
         case .deepSeek: return "DeepSeek"
         case nil: return "其他模型"
         }
+    }
+
+    /// A compact, model-specific label for the task row. Keep this separate
+    /// from `providerDisplayName`: users need to distinguish models that share
+    /// one provider, while provider routing still uses `providerMode`.
+    public var modelDisplayName: String {
+        guard let rawModel = model?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawModel.isEmpty else { return providerDisplayName }
+
+        let normalized = rawModel.lowercased()
+        switch normalized {
+        case "gpt-6-astra": return "GPT-6"
+        case "deepseek-flash": return "DS-Flash"
+        case "deepseek-v4-pro": return "DS-V4 Pro"
+        case "deepseek-v4-flash": return "DS-V4 Flash"
+        case "deepseek-v4-flash-vision-exp": return "DS-V4 Vision"
+        default: break
+        }
+
+        if normalized.hasPrefix("gpt-") {
+            return compactModelName(prefix: "GPT-", suffix: String(normalized.dropFirst(4)))
+        }
+        if normalized.hasPrefix("deepseek-") {
+            return compactModelName(prefix: "DS-", suffix: String(normalized.dropFirst(9)))
+        }
+
+        // Preserve a real but unfamiliar model id rather than showing the
+        // misleading generic label "其他模型". Bound its width so a
+        // newly introduced model cannot break the compact task layout.
+        return rawModel.count <= 18 ? rawModel : String(rawModel.prefix(17)) + "…"
+    }
+
+    private func compactModelName(prefix: String, suffix: String) -> String {
+        let components = suffix.split(separator: "-").map { component -> String in
+            let value = String(component)
+            return value.allSatisfy(\.isNumber) || value.contains(".")
+                ? value
+                : value.prefix(1).uppercased() + value.dropFirst()
+        }
+        let label = prefix + components.joined(separator: " ")
+        return label.count <= 18 ? label : String(label.prefix(17)) + "…"
     }
 }
 
@@ -245,11 +286,14 @@ public enum TaskOpenPolicy {
                 ? .direct
                 : .switchProvider(mode: .openAI, model: nil)
         case .deepSeek:
-            guard let modelName = task.model,
-                  let taskModel = DeepSeekModel(rawValue: modelName) else {
+            guard let taskModel = DeepSeekModel.compatible(rawValue: task.model) else {
                 return .unsupported(message: "无法识别该 DeepSeek 任务使用的具体模型，已阻止打开。")
             }
-            return activeProvider == .deepSeek && activeDeepSeekModel == taskModel
+            // The active DeepSeek catalog contains every supported external
+            // model. Once the provider is active, Codex's native picker owns
+            // model selection and opening another DeepSeek model never needs a
+            // provider restart.
+            return activeProvider == .deepSeek
                 ? .direct
                 : .switchProvider(mode: .deepSeek, model: taskModel)
         }

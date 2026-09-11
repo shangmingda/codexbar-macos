@@ -13,24 +13,51 @@ public enum ModelProviderMode: String, Codable, CaseIterable, Sendable {
 }
 
 public enum DeepSeekModel: String, Codable, CaseIterable, Identifiable, Sendable {
-    case flash = "deepseek-v4-flash"
+    // 对齐 DeepSeek 官方 CODEX_MODELS_JSON 目录：仅保留 deepseek-flash 与 deepseek-v4-pro。
+    // 旧 slug deepseek-v4-flash / deepseek-v4-flash-vision-exp 已从官方目录下线，
+    // 图像输入能力已并入 deepseek-flash。
+    case flash = "deepseek-flash"
     case pro = "deepseek-v4-pro"
-    case visionExperimental = "deepseek-v4-flash-vision-exp"
 
     public var id: String { rawValue }
     public var shortName: String {
         switch self {
-        case .flash: return "V4 Flash"
+        case .flash: return "Flash"
         case .pro: return "V4 Pro"
-        case .visionExperimental: return "V4 Vision"
         }
     }
     public var displayName: String {
         switch self {
-        case .flash: return "DeepSeek-V4-Flash"
+        case .flash: return "DeepSeek-Flash"
         case .pro: return "DeepSeek-V4-Pro"
-        case .visionExperimental: return "DeepSeek-V4-Flash-Vision (Exp)"
         }
+    }
+
+    /// Maps model ids written by earlier official DeepSeek catalogs to the
+    /// current catalog so existing Codex conversations remain recognizable.
+    public static func compatible(rawValue: String?) -> DeepSeekModel? {
+        switch rawValue?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case DeepSeekModel.flash.rawValue, "deepseek-v4-flash", "deepseek-v4-flash-vision-exp":
+            return .flash
+        case DeepSeekModel.pro.rawValue:
+            return .pro
+        default:
+            return nil
+        }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let value = try container.decode(String.self)
+        guard let model = Self.compatible(rawValue: value) else {
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unsupported DeepSeek model: \(value)")
+        }
+        self = model
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
     }
 }
 

@@ -292,22 +292,38 @@ struct DashboardView: View {
 
     private var deepSeekQuotaCard: some View {
         VStack(alignment: .leading, spacing: 11) {
-            Picker("DeepSeek 模型", selection: Binding(
-                get: { state.activeDeepSeekModel },
-                set: { requestProviderSwitch(to: .deepSeek, model: $0) }
-            )) {
-                ForEach(DeepSeekModel.allCases) { model in Text(model.shortName).tag(model) }
+            HStack(spacing: 7) {
+                Image(systemName: "cursorarrow.click.2")
+                    .foregroundStyle(Color.accentColor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("在 Codex 原生菜单选择模型")
+                        .font(.system(size: 10.5, weight: .semibold))
+                    Text("无需返回 CodexBar，也不会因换模型重启 Codex")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .disabled(state.isProviderSwitching)
+            .padding(9)
+            .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+
+            HStack(spacing: 6) {
+                ForEach(DeepSeekModel.allCases) { model in
+                    Text(model.shortName)
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.primary.opacity(0.06), in: Capsule())
+                }
+            }
 
             if let balance = state.deepSeekBalance {
                 HStack(alignment: .firstTextBaseline) {
                     Label(balance.isAvailable ? "API 可用" : "余额不足", systemImage: balance.isAvailable ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
                         .foregroundStyle(balance.isAvailable ? Color.green : Color.red)
                     Spacer()
-                    Text(state.activeDeepSeekModel.displayName)
+                    Text("原生选模")
                         .foregroundStyle(.secondary)
                 }
                 .font(.system(size: 10.5, weight: .semibold))
@@ -357,8 +373,8 @@ struct DashboardView: View {
         pendingProviderMode = mode
         pendingDeepSeekModel = targetModel
         pendingTaskToOpen = nil
-        // Every real provider/model change restarts Codex. Always confirm instead of
-        // relying solely on the periodically refreshed running-task snapshot.
+        // Only a provider change restarts Codex. DeepSeek model changes are
+        // handled by Codex's native picker after the provider becomes active.
         showProviderRestartConfirmation = true
     }
 
@@ -368,7 +384,10 @@ struct DashboardView: View {
         case .openAI:
             return "OpenAI 原模型"
         case .deepSeek:
-            return (pendingDeepSeekModel ?? state.activeDeepSeekModel).displayName
+            if pendingTaskToOpen != nil {
+                return (pendingDeepSeekModel ?? state.activeDeepSeekModel).displayName
+            }
+            return "DeepSeek 外部模型"
         }
     }
 
@@ -391,12 +410,12 @@ struct DashboardView: View {
             let interruption = state.tasks.isEmpty
                 ? ""
                 : "当前 \(state.tasks.count) 个运行任务的生成或工具调用会被中断。"
-            return "该对话属于 \(pendingTaskToOpen.providerDisplayName)，必须先切换回它的原 Provider 和模型，并完整重启 Codex。\(interruption)对话不会被删除；重启后将直接打开原任务“\(pendingTaskToOpen.title)”，不会新建替代对话。"
+            return "该对话属于 \(pendingTaskToOpen.providerDisplayName)，必须先切换回它的原 Provider，并完整重启 Codex。\(interruption)对话不会被删除；重启后将直接打开原任务“\(pendingTaskToOpen.title)”。DeepSeek 内部模型之后可在 Codex 原生菜单直接切换。"
         }
         if state.tasks.isEmpty {
-            return "切换至 \(providerSwitchTargetName) 需要完整重启 Codex。原任务不会删除，但仍绑定原 Provider；重启后 CodexBar 会打开一个与新模型匹配的新任务。之后点击其他 Provider 的任务可再安全切回。"
+            return "切换至 \(providerSwitchTargetName) 需要完整重启 Codex。原任务不会删除；进入 DeepSeek 后，Flash 与 V4 Pro 可直接在 Codex 原生模型菜单切换，不再重复重启。"
         }
-        return "切换至 \(providerSwitchTargetName) 需要完整重启 Codex。当前生成和工具调用会被中断；原任务不会删除，但只能在它原本的 Provider 下继续。重启后会自动打开匹配的新任务，建议先等待当前任务结束。"
+        return "切换至 \(providerSwitchTargetName) 需要完整重启 Codex。当前生成和工具调用会被中断；原任务不会删除。进入 DeepSeek 后，Flash 与 V4 Pro 可在 Codex 原生模型菜单直接切换。建议先等待当前任务结束。"
     }
 
     private func requestTaskOpen(_ task: ActiveTask) {
@@ -619,11 +638,13 @@ private struct TaskRow: View {
                         Image(systemName: "target").font(.system(size: 8))
                         Text("Goal")
                     }
-                    Text(task.providerDisplayName)
+                    Text(task.modelDisplayName)
                         .font(.system(size: 8.5, weight: .semibold))
                         .foregroundStyle(task.providerMode == .deepSeek ? Color.purple : Color.secondary)
                         .padding(.horizontal, 4).padding(.vertical, 1)
                         .background(Color.primary.opacity(0.055), in: Capsule())
+                        .lineLimit(1)
+                        .help("模型：\(task.model ?? task.providerDisplayName)")
                     Text(task.folderName).lineLimit(1)
                     Text("·")
                     Text(task.elapsedReferenceDate, style: .relative)

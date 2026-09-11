@@ -4,13 +4,37 @@ import Foundation
 @main
 struct SelfTests {
     static func main() throws {
+        if let fixtureArgument = CommandLine.arguments.first(where: { $0.hasPrefix("--prepare-openai-compat-fixture=") }) {
+            let root = URL(fileURLWithPath: String(fixtureArgument.dropFirst("--prepare-openai-compat-fixture=".count)), isDirectory: true)
+            let configURL = root.appendingPathComponent("codex/config.toml")
+            let supportURL = root.appendingPathComponent("support", isDirectory: true)
+            try FileManager.default.createDirectory(at: configURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("model = \"gpt-5.6-sol\"\nmodel_provider = \"openai\"\nmodel_reasoning_effort = \"high\"\n".utf8).write(to: configURL, options: .atomic)
+            let manager = ProviderConfigManager(paths: ProviderConfigPaths(configURL: configURL, supportDirectory: supportURL))
+            _ = try manager.activateOpenAICompatibility(apiKey: nil)
+            print("openai-compat-fixture-ready")
+            return
+        }
+        if let fixtureArgument = CommandLine.arguments.first(where: { $0.hasPrefix("--prepare-native-picker-fixture=") }) {
+            let root = URL(fileURLWithPath: String(fixtureArgument.dropFirst("--prepare-native-picker-fixture=".count)), isDirectory: true)
+            let configURL = root.appendingPathComponent("codex/config.toml")
+            let supportURL = root.appendingPathComponent("support", isDirectory: true)
+            try FileManager.default.createDirectory(at: configURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("model = \"gpt-5.6-sol\"\nmodel_reasoning_effort = \"xhigh\"\n".utf8).write(to: configURL, options: .atomic)
+            let script = try String(contentsOf: DeepSeekClient.setupScriptURL, encoding: .utf8)
+            let catalog = try DeepSeekClient.extractOfficialModelCatalog(from: script)
+            let manager = ProviderConfigManager(paths: ProviderConfigPaths(configURL: configURL, supportDirectory: supportURL))
+            _ = try manager.activateDeepSeek(model: .flash, catalogData: catalog, apiKey: "codexbar-selftest-key")
+            print("native-picker-fixture-ready")
+            return
+        }
         if let fixtureArgument = CommandLine.arguments.first(where: { $0.hasPrefix("--prepare-provider-recovery-fixture=") }) {
             let root = URL(fileURLWithPath: String(fixtureArgument.dropFirst("--prepare-provider-recovery-fixture=".count)), isDirectory: true)
             let configURL = root.appendingPathComponent("codex/config.toml")
             let supportURL = root.appendingPathComponent("support", isDirectory: true)
             try FileManager.default.createDirectory(at: configURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             try Data("model = \"gpt-5.6-sol\"\nmodel_reasoning_effort = \"xhigh\"\n".utf8).write(to: configURL, options: .atomic)
-            let catalog = Data(#"{"models":[{"slug":"deepseek-v4-flash"},{"slug":"deepseek-v4-pro"},{"slug":"deepseek-v4-flash-vision-exp"}]}"#.utf8)
+            let catalog = Data(#"{"models":[{"slug":"deepseek-flash","display_name":"DeepSeek-Flash","description":"Native picker fixture","default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"high","description":"Fixture"}],"input_modalities":["text","image"],"shell_type":"shell_command","visibility":"list","minimal_client_version":"0.144.0","supported_in_api":true,"priority":1},{"slug":"deepseek-v4-pro","display_name":"DeepSeek-V4-Pro","description":"Native picker fixture","default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"high","description":"Fixture"}],"input_modalities":["text"],"shell_type":"shell_command","visibility":"list","minimal_client_version":"0.144.0","supported_in_api":true,"priority":2}]}"#.utf8)
             let manager = ProviderConfigManager(paths: ProviderConfigPaths(configURL: configURL, supportDirectory: supportURL))
             _ = try manager.activateDeepSeek(model: .flash, catalogData: catalog, apiKey: "codexbar-selftest-key")
             print("fixture-ready")
@@ -43,10 +67,10 @@ struct SelfTests {
         try check(consumeNoCredit == .noCredit, "没有可用重置卡结果解析")
         try check(consumeRedeemed == .alreadyRedeemed, "幂等重复兑换结果解析")
 
-        let availableModelsData = Data(#"{"object":"list","data":[{"id":"deepseek-v4-flash"},{"id":"deepseek-v4-pro"},{"id":"deepseek-v4-flash-vision-exp"}]}"#.utf8)
+        let availableModelsData = Data(#"{"object":"list","data":[{"id":"deepseek-flash"},{"id":"deepseek-v4-pro"}]}"#.utf8)
         let availableModels = try DeepSeekClient.parseAvailableModels(availableModelsData)
-        try check(availableModels.contains(DeepSeekModel.visionExperimental.rawValue), "DeepSeek Vision 实验模型 API 列表解析")
-        try check(DeepSeekModel.visionExperimental.shortName == "V4 Vision", "DeepSeek Vision 模型界面名称")
+        try check(availableModels.contains(DeepSeekModel.flash.rawValue), "DeepSeek Flash 模型 API 列表解析")
+        try check(DeepSeekModel.flash.shortName == "Flash", "DeepSeek Flash 模型界面名称")
         try check(
             !DeepSeekBackgroundRefreshPolicy.shouldRefresh(hasKey: true, activeProvider: .openAI),
             "OpenAI 模式不在后台读取 DeepSeek 凭据"
@@ -63,14 +87,14 @@ struct SelfTests {
         let currentSetupScript = #"""
         write_models_json() {
           cat > "$1" <<'CODEX_MODELS_JSON'
-        {"models":[{"slug":"deepseek-v4-flash"},{"slug":"deepseek-v4-pro"},{"slug":"deepseek-v4-flash-vision-exp"}]}
+        {"models":[{"slug":"deepseek-flash"},{"slug":"deepseek-v4-pro"}]}
         CODEX_MODELS_JSON
         }
         """#
         let extractedCatalog = try DeepSeekClient.extractOfficialModelCatalog(from: currentSetupScript)
         let extractedObject = try JSONSerialization.jsonObject(with: extractedCatalog) as? [String: Any]
         let extractedModels = (extractedObject?["models"] as? [[String: Any]])?.compactMap { $0["slug"] as? String } ?? []
-        try check(extractedModels.contains(DeepSeekModel.visionExperimental.rawValue), "DeepSeek 新版官方脚本目录提取")
+        try check(extractedModels.contains(DeepSeekModel.flash.rawValue), "DeepSeek 新版官方脚本目录提取")
 
         let autoUseNow = Date(timeIntervalSince1970: 1_784_100_000)
         let dueLater = ResetCredit(id: "later", status: "available", expiresAt: autoUseNow.addingTimeInterval(3_601), title: nil)
@@ -113,8 +137,16 @@ struct SelfTests {
         try check(tasks[0].isGoal && tasks[0].isRunning, "Goal 与普通运行状态可同时标记")
         try check(tasks[0].providerMode == .deepSeek && tasks[0].providerDisplayName == "DeepSeek", "任务 Provider 归属解析")
         try check(tasks[0].model == DeepSeekModel.pro.rawValue, "任务模型归属解析")
+        try check(tasks[0].modelDisplayName == "DS-V4 Pro", "DeepSeek 任务展示具体模型短名")
         let openAITask = ActiveTask(id: "openai", title: "原生任务", objective: "", cwd: "/tmp", tokensUsed: 0, timeUsedSeconds: 0, updatedAt: Date(), modelProvider: "openai", model: "gpt-5.6-sol")
         try check(openAITask.providerMode == .openAI, "OpenAI 任务 Provider 识别")
+        try check(openAITask.modelDisplayName == "GPT-5.6 Sol", "OpenAI 任务展示具体模型短名")
+        let gpt6Task = ActiveTask(id: "gpt6", title: "GPT-6 任务", objective: "", cwd: "/tmp", tokensUsed: 0, timeUsedSeconds: 0, updatedAt: Date(), modelProvider: "openai", model: "gpt-6-astra")
+        try check(gpt6Task.modelDisplayName == "GPT-6", "GPT-6 Astra 任务使用精简名")
+        let legacyFlashTask = ActiveTask(id: "legacy-ds", title: "旧 DeepSeek 任务", objective: "", cwd: "/tmp", tokensUsed: 0, timeUsedSeconds: 0, updatedAt: Date(), modelProvider: "codexbar-deepseek", model: "deepseek-v4-flash")
+        try check(legacyFlashTask.modelDisplayName == "DS-V4 Flash", "旧 DeepSeek 任务保留可识别短名")
+        let futureTask = ActiveTask(id: "future", title: "未来模型", objective: "", cwd: "/tmp", tokensUsed: 0, timeUsedSeconds: 0, updatedAt: Date(), modelProvider: "future-provider", model: "future-model-preview-version")
+        try check(futureTask.modelDisplayName == "future-model-prev…", "未知新模型显示真实 id 而非其他模型")
         let openAIHTTPTask = ActiveTask(id: "openai-http", title: "HTTP 原生任务", objective: "", cwd: "/tmp", tokensUsed: 0, timeUsedSeconds: 0, updatedAt: Date(), modelProvider: "openai-http", model: "gpt-5.6-sol")
         try check(openAIHTTPTask.providerMode == .openAI, "openai-http Provider 显示为 OpenAI")
         try check(openAIHTTPTask.providerDisplayName == "OpenAI", "openai-http Provider 不显示为未知模型")
@@ -142,11 +174,16 @@ struct SelfTests {
             TaskOpenPolicy.route(for: tasks[0], activeProvider: .deepSeek, activeDeepSeekModel: .pro) == .direct,
             "DeepSeek Provider 和模型同时匹配时直接打开"
         )
-        let visionTask = ActiveTask(id: "vision", title: "Vision 任务", objective: "", cwd: "/tmp", tokensUsed: 0, timeUsedSeconds: 0, updatedAt: Date(), modelProvider: ProviderConfigManager.providerID, model: DeepSeekModel.visionExperimental.rawValue)
+        let proTask = ActiveTask(id: "pro", title: "Pro 任务", objective: "", cwd: "/tmp", tokensUsed: 0, timeUsedSeconds: 0, updatedAt: Date(), modelProvider: ProviderConfigManager.providerID, model: DeepSeekModel.pro.rawValue)
         try check(
-            TaskOpenPolicy.route(for: visionTask, activeProvider: .deepSeek, activeDeepSeekModel: .flash) == .switchProvider(mode: .deepSeek, model: .visionExperimental),
-            "DeepSeek 不同模型的原任务会切回精确模型"
+            TaskOpenPolicy.route(for: proTask, activeProvider: .deepSeek, activeDeepSeekModel: .flash) == .direct,
+            "DeepSeek Provider 内不同模型由 Codex 原生菜单处理，不再重启"
         )
+        let legacyDeepSeekTask = ActiveTask(id: "legacy-ds", title: "旧 DeepSeek 任务", objective: "", cwd: "/tmp", tokensUsed: 0, timeUsedSeconds: 0, updatedAt: Date(), modelProvider: ProviderConfigManager.legacyProviderID, model: "deepseek-v4-flash-vision-exp")
+        try check(legacyDeepSeekTask.providerMode == .deepSeek, "旧版连字符 DeepSeek Provider 兼容识别")
+        try check(DeepSeekModel.compatible(rawValue: legacyDeepSeekTask.model) == .flash, "旧版 Flash/Vision 模型映射到当前 Flash")
+        let decodedLegacyModel = try JSONDecoder().decode(DeepSeekModel.self, from: Data(#""deepseek-v4-flash-vision-exp""#.utf8))
+        try check(decodedLegacyModel == .flash, "旧版模型租约可升级解码，不阻断配置恢复")
         let unknownProviderTask = ActiveTask(id: "unknown", title: "未知任务", objective: "", cwd: "/tmp", tokensUsed: 0, timeUsedSeconds: 0, updatedAt: Date(), modelProvider: "other-provider", model: "other-model")
         if case .unsupported = TaskOpenPolicy.route(for: unknownProviderTask, activeProvider: .openAI, activeDeepSeekModel: .flash) {
             try check(true, "未知 Provider 不会被错误打开")
@@ -257,20 +294,28 @@ struct SelfTests {
         """#
         let originalProviderData = Data(originalProviderConfig.utf8)
         try originalProviderData.write(to: providerConfigURL, options: .atomic)
-        let minimalCatalog = Data(#"{"models":[{"slug":"deepseek-v4-flash"},{"slug":"deepseek-v4-pro"},{"slug":"deepseek-v4-flash-vision-exp"}]}"#.utf8)
+        let minimalCatalog = Data(#"{"models":[{"slug":"deepseek-flash"},{"slug":"deepseek-v4-pro"}]}"#.utf8)
         let providerManager = ProviderConfigManager(paths: ProviderConfigPaths(configURL: providerConfigURL, supportDirectory: providerSupportURL))
+        let compatible = try providerManager.activateOpenAICompatibility(apiKey: "codexbar-selftest-key")
+        let compatibleConfig = try String(contentsOf: providerConfigURL, encoding: .utf8)
+        try check(compatible.mode == .openAI, "OpenAI 默认模式保留")
+        try check(compatibleConfig.contains("model = \"gpt-5.6-sol\"") && compatibleConfig.contains("[model_providers.codexbar_deepseek]"), "OpenAI 模式注册 DeepSeek 历史对话 Provider")
+        try check(compatibleConfig.contains("[model_providers.codexbar-deepseek]"), "旧版 DeepSeek Provider 别名已注册")
+        try check(compatibleConfig.contains("[model_providers.deepseek]"), "DeepSeek 官方 Provider 别名已注册")
+        try check(!compatibleConfig.contains("model_catalog_json"), "OpenAI 原生模型目录不被外部目录覆盖")
         let switched = try providerManager.activateDeepSeek(model: .flash, catalogData: minimalCatalog, apiKey: "codexbar-selftest-key")
         let switchedConfig = try String(contentsOf: providerConfigURL, encoding: .utf8)
         try check(switched.mode == .deepSeek && switched.deepSeekModel == .flash, "DeepSeek 切换事务进入 Flash 模式")
-        try check(switchedConfig.contains("model = \"deepseek-v4-flash\"") && switchedConfig.contains("wire_api = \"responses\""), "DeepSeek 官方 Responses 配置真实写入")
+        try check(switchedConfig.contains("model = \"deepseek-flash\"") && switchedConfig.contains("wire_api = \"responses\""), "DeepSeek 官方 Responses 配置真实写入")
+        try check(switchedConfig.contains("[model_providers.codexbar-deepseek]"), "DeepSeek 模式保留旧 Provider 对话兼容")
         try check(!switchedConfig.contains("gpt-5.6-sol") && !switchedConfig.contains("keep this multiline value"), "DeepSeek 不兼容的原模型参数在租约内隔离")
         try check(switchedConfig.contains("[plugins.demo]") && switchedConfig.contains("enabled = true"), "非模型 Codex 配置保持不变")
         _ = try providerManager.activateDeepSeek(model: .pro, catalogData: minimalCatalog, apiKey: "codexbar-selftest-key")
         let proConfig = try String(contentsOf: providerConfigURL, encoding: .utf8)
-        try check(proConfig.contains("model = \"deepseek-v4-pro\"") && !proConfig.contains("deepseek-v4-flash\"\nmodel_provider"), "DeepSeek Flash 与 Pro 可逆切换且不叠加配置")
-        _ = try providerManager.activateDeepSeek(model: .visionExperimental, catalogData: minimalCatalog, apiKey: "codexbar-selftest-key")
-        let visionConfig = try String(contentsOf: providerConfigURL, encoding: .utf8)
-        try check(visionConfig.contains("model = \"deepseek-v4-flash-vision-exp\""), "DeepSeek Vision 实验模型真实写入 Codex 配置")
+        try check(proConfig.contains("model = \"deepseek-v4-pro\"") && !proConfig.contains("deepseek-flash\"\nmodel_provider"), "DeepSeek Flash 与 Pro 可逆切换且不叠加配置")
+        _ = try providerManager.activateDeepSeek(model: .flash, catalogData: minimalCatalog, apiKey: "codexbar-selftest-key")
+        let flashAgainConfig = try String(contentsOf: providerConfigURL, encoding: .utf8)
+        try check(flashAgainConfig.contains("model = \"deepseek-flash\""), "DeepSeek Flash 模型真实写入 Codex 配置")
         let independentRecoveryManager = ProviderConfigManager(paths: ProviderConfigPaths(configURL: providerConfigURL, supportDirectory: providerSupportURL))
         _ = try independentRecoveryManager.restore()
         let restoredProviderData = try Data(contentsOf: providerConfigURL)

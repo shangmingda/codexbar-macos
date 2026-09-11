@@ -44,6 +44,7 @@ final class AppState: ObservableObject {
     private var taskRefreshInFlight = false
     private var quotaRefreshInFlight = false
     private var deepSeekRefreshInFlight = false
+    private var providerCompatibilityInFlight = false
     private var budgetRefreshInFlight = false
     private var warningInFlight = Set<String>()
     private var lastWarningAttempt: [String: Date] = [:]
@@ -60,7 +61,7 @@ final class AppState: ObservableObject {
     var statusLines: [String] {
         if providerStatus.mode == .deepSeek {
             let balance = deepSeekBalance?.balances.first?.formattedTotal ?? "余额 --"
-            var first = "DS \(providerStatus.deepSeekModel.shortName) · \(balance)"
+            var first = "DS 原生选模 · \(balance)"
             if !tasks.isEmpty { first = "\(tasks.count)项 · " + first }
             return [first]
         }
@@ -135,14 +136,14 @@ final class AppState: ObservableObject {
 
     func start() {
         refreshAll()
+        prepareProviderCompatibilityIfPossible()
         if DeepSeekBackgroundRefreshPolicy.shouldRefresh(
             hasKey: deepSeekKeyConfigured,
             activeProvider: providerStatus.mode
         ) { refreshDeepSeekBalance() }
         if needsStartupCodexRecovery {
             needsStartupCodexRecovery = false
-            codexProcessController.reloadSharedAppServer()
-            providerNotice = "OpenAI 配置已恢复；为避免中断任务，CodexBar 未自动退出 Codex，请在方便时手动重启"
+            providerNotice = "已安全恢复 OpenAI 配置；未重启 Codex，也未中断正在运行的任务"
         }
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
@@ -627,7 +628,22 @@ final class AppState: ObservableObject {
                 deepSeekSessionAPIKey = normalized
                 deepSeekKeyConfigured = true
                 deepSeekBalance = balance
-                providerNotice = "DeepSeek Key 已验证并安全保存到 macOS 钥匙串"
+                do {
+                    if providerStatus.mode == .deepSeek {
+                        let catalog = try await deepSeekClient.fetchOfficialModelCatalog()
+                        providerStatus = try providerManager.activateDeepSeek(
+                            model: providerStatus.deepSeekModel,
+                            catalogData: catalog,
+                            apiKey: normalized
+                        )
+                    } else {
+                        providerStatus = try providerManager.activateOpenAICompatibility(apiKey: normalized)
+                    }
+                    startProviderLeaseHeartbeat()
+                    providerNotice = "DeepSeek Key 已保存到 macOS 钥匙串；历史外部模型对话兼容已启用"
+                } catch {
+                    providerNotice = "DeepSeek Key 已保存，但对话兼容配置失败：\(error.localizedDescription)"
+                }
                 lastUpdated = Date()
                 completion?(true)
             } catch {
@@ -643,6 +659,10 @@ final class AppState: ObservableObject {
             return
         }
         do {
+            if providerManager.hasActiveTransaction() {
+                providerStatus = try providerManager.restore()
+                stopProviderLeaseHeartbeat()
+            }
             try credentialStore.delete()
             deepSeekSessionAPIKey = nil
             deepSeekKeyConfigured = false
@@ -651,6 +671,25 @@ final class AppState: ObservableObject {
             providerNotice = "DeepSeek Key 已从 macOS 钥匙串删除"
         } catch {
             deepSeekError = error.localizedDescription
+        }
+    }
+
+    private func prepareProviderCompatibilityIfPossible() {
+        guard !providerCompatibilityInFlight else { return }
+        providerCompatibilityInFlight = true
+        Task {
+            defer { providerCompatibilityInFlight = false }
+            do {
+                let apiKey = deepSeekKeyConfigured ? try credentialStore.loadNonInteractively() : nil
+                deepSeekSessionAPIKey = apiKey
+                providerStatus = try providerManager.activateOpenAICompatibility(apiKey: apiKey)
+                startProviderLeaseHeartbeat()
+                providerNotice = apiKey == nil
+                    ? "历史 DeepSeek 对话已兼容；切换 DeepSeek 时再由你授权读取 Key"
+                    : "历史 DeepSeek 对话已兼容；切到 DeepSeek 后可在 Codex 原生菜单选模"
+            } catch {
+                logger.warning("Non-interactive provider compatibility setup skipped: \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 
@@ -728,21 +767,27 @@ final class AppState: ObservableObject {
                     }
                     refreshDeepSeekBalance()
                 case .openAI:
-                    providerStatus = try providerManager.restore()
-                    stopProviderLeaseHeartbeat()
+                    // Returning to OpenAI must never depend on DeepSeek Keychain
+                    // access. Reuse an already unlocked key when available; a
+                    // provider skeleton is sufficient to keep historical
+                    // DeepSeek threads recognizable until the user switches back.
+                    let apiKey = try (deepSeekSessionAPIKey ?? credentialStore.loadNonInteractively())
+                    deepSeekSessionAPIKey = apiKey
+                    providerStatus = try providerManager.activateOpenAICompatibility(apiKey: apiKey)
+                    startProviderLeaseHeartbeat()
                     try await providerVerifier.verify(mode: .openAI)
                     try await codexProcessController.restartCodex(userConfirmed: userConfirmed, openWhenNotRunning: true)
                     if let taskToOpen {
                         do {
                             try await openTaskAfterProviderSwitch(taskToOpen, mode: .openAI, model: nil)
-                            providerNotice = "已恢复 OpenAI 原配置并打开原任务“\(shortTitle(taskToOpen.title))”"
+                            providerNotice = "已恢复 OpenAI，并保留外部对话兼容；已打开“\(shortTitle(taskToOpen.title))”"
                         } catch {
                             providerNotice = "已恢复 OpenAI 原配置，但原任务打开失败；请再点击该任务（\(error.localizedDescription)）"
                         }
                     } else {
                         do {
                             try await createAndOpenMatchingTask(mode: .openAI, model: targetModel, cwd: preferredCWD)
-                            providerNotice = "已原样恢复 OpenAI 配置和原模型参数，并打开新的 OpenAI 任务"
+                            providerNotice = "已恢复 OpenAI 原配置和原生模型菜单，并打开新任务"
                         } catch {
                             providerNotice = "已原样恢复 OpenAI 配置和原模型参数；请在 Codex 新建 OpenAI 任务（自动新建失败：\(error.localizedDescription)）"
                         }
@@ -797,11 +842,15 @@ final class AppState: ObservableObject {
             expectedProvider = ProviderConfigManager.providerID
             modelName = model.rawValue
         case .openAI:
-            expectedProvider = "openai"
             let config = try await providerVerifier.readEffectiveConfig()
             guard let restoredModel = config["model"] as? String, !restoredModel.isEmpty else {
                 throw CodexThreadLauncherError.malformedResponse
             }
+            let restoredProvider = (config["model_provider"] as? String) ?? "openai"
+            guard restoredProvider == "openai" || restoredProvider == "openai-http" else {
+                throw CodexThreadLauncherError.providerMismatch(expected: "openai/openai-http", actual: restoredProvider)
+            }
+            expectedProvider = restoredProvider
             modelName = restoredModel
         }
         let validCWD = cwd.flatMap { value in

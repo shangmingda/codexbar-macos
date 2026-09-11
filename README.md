@@ -7,12 +7,12 @@ CodexBar 是一个原生 macOS 菜单栏工具，用于查看当前 Codex 账号
 - 使用独立 CodexBar 标识；菜单栏、状态面板与宣传页面保持同一套产品识别。
 - 自动读取当前 Codex 账号的真实额度窗口：仅有周额度时显示一行；恢复“5 小时 + 周额度”时自动显示两行。
 - 限额解析仅使用 Codex 主额度快照，不会把 `gpt-reserve` / `base_model_inference` 等其他产品的周窗口混入 Codex 周额度。
-- 额度区可在 OpenAI 原生模式与 DeepSeek 模式之间切换；DeepSeek 支持 `V4 Flash` / `V4 Pro`，并通过官方 `/user/balance` 展示真实人民币或美元余额。
-- 提供 DeepSeek API Key 配置入口；Key 先在线验证，再仅保存到 macOS 钥匙串，不写入 `config.toml`、仓库或日志。
-- 模型切换会校验 Codex 的有效配置并完整重启 Codex，使后续任务真实使用所选 provider；切换会中断当时仍在运行的任务。
-- 任务列表保留 Provider 和 DeepSeek 具体模型归属；点击另一 Provider/模型的任务时，经明确确认后自动切回原配置、重启 Codex 并打开原对话，不新建替代任务。
-- DeepSeek 采用临时配置租约：切回 OpenAI、正常退出 CodexBar、CodexBar 异常退出或下次登录发现残留时，都会逐字节恢复切换前的 Codex 配置并重启 Codex。
-- DeepSeek API Key 保存在 macOS Keychain；OpenAI 模式只非交互检查条目是否存在，不读取密文、不后台刷新 DeepSeek，诊断程序也永不读取该 Keychain 条目。
+- 额度区可在 OpenAI 原生模式与 DeepSeek 模式之间切换；DeepSeek 目录包含 `DeepSeek-Flash` / `DeepSeek-V4-Pro`，并通过官方 `/user/balance` 展示真实人民币或美元余额。
+- 提供 DeepSeek API Key 配置入口；Key 先在线验证，再保存到 macOS 钥匙串。CodexBar 活跃期间按 DeepSeek 官方协议生成权限为 0600 的临时 Codex 配置租约，退出后原样恢复，不写入仓库或日志。
+- 只有 OpenAI / DeepSeek Provider 切换需要校验配置并在用户当次确认后完整重启 Codex；进入 DeepSeek 后，两种外部模型直接在 Codex 原生模型菜单切换，不再重复重启。
+- 任务卡直接显示具体模型短名（如 `GPT-6`、`GPT-5.6 Sol`、`DS-Flash`），并保留 Provider 归属用于安全路由；同一 DeepSeek Provider 的不同模型任务可直接打开，跨 Provider 时经明确确认后切回并打开原对话，不新建替代任务。
+- DeepSeek 采用临时配置租约：OpenAI 模式也注册当前及旧版 DeepSeek Provider，使历史外部模型对话不再报 `provider not found`；正常退出、异常退出或下次登录发现残留时，都会逐字节恢复切换前的 Codex 配置。
+- DeepSeek API Key 保存在 macOS Keychain；启动兼容注册仅尝试非交互读取，若 macOS 要求授权会静默跳过，只有用户明确切换 DeepSeek 时才允许出现一次系统授权；OpenAI 模式不后台刷新 DeepSeek，诊断程序也永不读取该 Keychain 条目。
 - 面板会标明已识别的单/双额度模式；任务列表保持在主操作区，重置卡以“数量 + 到期日 + 自动使用开关”紧凑展示，点击后再查看逐卡详情与下一次自动使用时间。明细不完整时自动重试，不显示伪造的“未知日期”。
 - 可明确开启“到期前 1 小时自动使用重置卡”；真实兑换、最早到期优先，并用稳定幂等键避免重复消耗。
 - 合并统计 Codex 桌面版普通运行任务与 `active` Goal，同一线程只计一次。
@@ -36,7 +36,7 @@ CodexBar 是一个原生 macOS 菜单栏工具，用于查看当前 Codex 账号
 | Intel Mac | 源码可构建，尚未实机验证 |
 | Codex Desktop | 需要已安装并登录当前用户账号 |
 | Codex 额度模式 | 自动识别单窗口或双窗口 |
-| DeepSeek Codex 集成 | V4 Flash / V4 Pro / V4 Vision，Responses API；需要有效 API Key 和可用余额 |
+| DeepSeek Codex 集成 | DeepSeek-Flash / DeepSeek-V4-Pro，Responses API；原生模型菜单切换；需要有效 API Key 和可用余额 |
 | 多 macOS 用户 | 只读取当前登录用户的 `CODEX_HOME` / `~/.codex` |
 | 纯 Codex CLI 任务 | 不纳入桌面版普通运行任务统计 |
 
@@ -112,8 +112,8 @@ cd codexbar-macos
 ## 隐私与实现边界
 
 - 额度通过当前机器自带的 Codex `app-server` 读取，自动使用 Codex Desktop 当前登录账号。
-- DeepSeek 模式使用 DeepSeek 官方 Responses API 配置；支持 V4 Flash、V4 Pro 与带图片输入的 V4 Flash Vision 实验模型。模型目录从官方安装脚本中只读提取并校验，不执行远程脚本；切换前还会用当前 Key 查询 `/models` 确认账号实际可用。
-- DeepSeek Key 由与 CodexBar 主程序相同的签名可执行文件从 macOS 钥匙串按需提供给 Codex，配置文件中只有凭据助手路径，没有明文 Key。
+- DeepSeek 模式使用 DeepSeek 官方 Responses API 配置；支持当前官方目录的 DeepSeek-Flash（含图片输入）与 DeepSeek-V4-Pro。模型目录从官方安装脚本中只读提取并校验，不执行远程脚本；切换前还会用当前 Key 查询 `/models` 确认账号实际可用。
+- DeepSeek Key 的持久来源只有 macOS 钥匙串。由于 Codex 当前官方接入字段是 `experimental_bearer_token`，CodexBar 活跃时会把 Key 写入权限为 0600 的临时租约配置供 Codex 使用；CodexBar 退出或看门狗恢复后会删除该临时内容并恢复原配置。
 - 模型事务会保存切换前配置的精确本地快照；若租约期间配置被其他程序改动，当前版本会先保存冲突副本，再优先恢复原配置，确保退出后不残留 DeepSeek provider。
 - 任务状态通过当前用户的 Codex 本地状态库和桌面主进程当前打开的 rollout 日志只读判断。
 - 单任务用量使用该线程 rollout 中的真实 `total_tokens`；全局周额度百分比不能可靠拆分给并行任务，因此不会用全局百分比伪造单任务用量。

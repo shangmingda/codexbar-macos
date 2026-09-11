@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.5.0
+
+- 对齐 DeepSeek 官方最新 Codex 目录：`deepseek-flash` 与 `deepseek-v4-pro`。
+- 进入 DeepSeek Provider 后，两种外部模型由 Codex 原生模型菜单直接选择；模型间切换不再修改全局配置或重启 Codex。
+- OpenAI 模式下保留临时 DeepSeek Provider 兼容注册，历史 DeepSeek 对话不再报 `model provider not found`；同时兼容早期 `codexbar-deepseek` 标识。
+- Key 仍由 CodexBar 录入、在线验证并保存到 macOS Keychain；仅在 CodexBar 活跃期间创建权限为 0600 的临时 Codex 租约，正常或异常退出均恢复原配置。
+- 启动兼容注册只尝试非交互读取 Keychain，不会因为本地签名更新循环弹出授权框。
+- `openai-http` 可通过 OpenAI 配置校验；恢复残留租约不再重启共享 app-server，避免干扰正在运行的 Codex 任务。
+- 任务卡标签改为具体模型短名（如 `GPT-6`、`GPT-5.6 Sol`、`DS-Flash`），新增未知模型也会显示经截断的真实 id，不再笼统显示 Provider。
+
 ## 1.4.8
 
 - 兼容 Codex 新写入的 `openai-http` 任务 Provider 标识，任务列表统一显示为 OpenAI，不再误报未知模型。

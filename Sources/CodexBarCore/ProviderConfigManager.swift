@@ -37,6 +37,8 @@ public struct ProviderConfigPaths: Sendable {
 
 public final class ProviderConfigManager: @unchecked Sendable {
     public static let providerID = "codexbar_deepseek"
+    public static let legacyProviderID = "codexbar-deepseek"
+    public static let officialProviderID = "deepseek"
     public static let transactionFileName = "provider-switch.json"
     public static let leaseFileName = "provider-lease.json"
     public static let catalogFileName = "deepseek-models.json"
@@ -64,7 +66,11 @@ public final class ProviderConfigManager: @unchecked Sendable {
         guard let transaction = try? loadTransaction() else {
             return ProviderSwitchStatus(mode: .openAI)
         }
-        return ProviderSwitchStatus(mode: .deepSeek, deepSeekModel: transaction.model, activatedAt: transaction.activatedAt)
+        return ProviderSwitchStatus(
+            mode: transaction.activeMode ?? .deepSeek,
+            deepSeekModel: transaction.model,
+            activatedAt: transaction.activatedAt
+        )
     }
 
     public func hasActiveTransaction() -> Bool { fileManager.fileExists(atPath: transactionURL.path) }
@@ -103,6 +109,7 @@ public final class ProviderConfigManager: @unchecked Sendable {
         var transaction = ProviderSwitchTransaction(
             version: 1,
             phase: .prepared,
+            activeMode: .deepSeek,
             model: model,
             activatedAt: existing?.activatedAt ?? now,
             originalConfigExisted: originalExists,
@@ -124,6 +131,59 @@ public final class ProviderConfigManager: @unchecked Sendable {
             throw ProviderConfigError.writeFailed(error.localizedDescription)
         }
         return ProviderSwitchStatus(mode: .deepSeek, deepSeekModel: model, activatedAt: transaction.activatedAt)
+    }
+
+    /// Keeps the user's original OpenAI defaults while registering CodexBar's
+    /// DeepSeek provider. This lets Codex resume an existing DeepSeek thread
+    /// without reporting `model provider not found`; the credential remains in
+    /// the same short-lived, permission-0600 lease and is removed on app exit.
+    @discardableResult
+    public func activateOpenAICompatibility(apiKey: String?) throws -> ProviderSwitchStatus {
+        try prepareSupportDirectory()
+
+        let existing = try? loadTransaction()
+        let originalExists: Bool
+        let originalData: Data
+        let originalPermissions: Int?
+        if let existing {
+            originalExists = existing.originalConfigExisted
+            originalData = existing.originalConfig
+            originalPermissions = existing.originalPermissions
+        } else {
+            originalExists = fileManager.fileExists(atPath: paths.configURL.path)
+            originalData = originalExists ? try Data(contentsOf: paths.configURL) : Data()
+            originalPermissions = originalExists ? Self.permissions(of: paths.configURL, fileManager: fileManager) : nil
+        }
+        guard let originalText = String(data: originalData, encoding: .utf8) else { throw ProviderConfigError.invalidUTF8 }
+        let patchedText = Self.makeOpenAICompatibleConfig(from: originalText, apiKey: apiKey)
+        guard let patchedData = patchedText.data(using: .utf8) else { throw ProviderConfigError.invalidUTF8 }
+        let now = Date()
+        var transaction = ProviderSwitchTransaction(
+            version: 1,
+            phase: .prepared,
+            activeMode: .openAI,
+            model: existing?.model ?? .flash,
+            activatedAt: existing?.activatedAt ?? now,
+            originalConfigExisted: originalExists,
+            originalConfig: originalData,
+            originalHash: Self.sha256(originalData),
+            originalPermissions: originalPermissions,
+            appliedHash: Self.sha256(patchedData)
+        )
+        try writeTransaction(transaction)
+        do {
+            try fileManager.createDirectory(at: paths.configURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try patchedData.write(to: paths.configURL, options: .atomic)
+            try setPermissions(originalPermissions ?? 0o600, at: paths.configURL)
+            try? fileManager.removeItem(at: catalogURL)
+            transaction.phase = .active
+            try writeTransaction(transaction)
+            try heartbeat()
+        } catch {
+            _ = try? restore()
+            throw ProviderConfigError.writeFailed(error.localizedDescription)
+        }
+        return ProviderSwitchStatus(mode: .openAI, deepSeekModel: transaction.model, activatedAt: transaction.activatedAt)
     }
 
     @discardableResult
@@ -180,7 +240,11 @@ public final class ProviderConfigManager: @unchecked Sendable {
             "service_tier", "model_verbosity", "model_reasoning_summary", "plan_mode_reasoning_effort",
             "experimental_use_unified_exec_tool"
         ]
-        let stripped = TOMLRootEditor.removingAssignments(rootKeys, from: original)
+        let strippedRoots = TOMLRootEditor.removingAssignments(rootKeys, from: original)
+        let stripped = TOMLRootEditor.removingTables(
+            managedProviderTables,
+            from: strippedRoots
+        )
         let header = """
         # >>> CodexBar temporary DeepSeek lease (automatically restored on exit)
         model = \(tomlString(model.rawValue))
@@ -191,20 +255,58 @@ public final class ProviderConfigManager: @unchecked Sendable {
         model_catalog_json = \(tomlString(catalogPath))
         # <<< CodexBar temporary DeepSeek lease
         """
-        let provider = """
-
-        # >>> CodexBar temporary DeepSeek provider
-        [model_providers.\(providerID)]
-        name = "DeepSeek (CodexBar)"
-        base_url = "https://api.deepseek.com/"
-        wire_api = "responses"
-        experimental_bearer_token = \(tomlString(apiKey))
-        # <<< CodexBar temporary DeepSeek provider
-        """
+        let provider = deepSeekProviderBlock(apiKey: apiKey)
         var body = stripped
         while body.hasPrefix("\n") { body.removeFirst() }
         if !body.isEmpty && !body.hasSuffix("\n") { body.append("\n") }
         return header + "\n" + body + provider + "\n"
+    }
+
+    public static func makeOpenAICompatibleConfig(from original: String, apiKey: String?) -> String {
+        var body = TOMLRootEditor.removingTables(
+            managedProviderTables,
+            from: original
+        )
+        while body.hasPrefix("\n") { body.removeFirst() }
+        if !body.isEmpty && !body.hasSuffix("\n") { body.append("\n") }
+        return body + deepSeekProviderBlock(apiKey: apiKey) + "\n"
+    }
+
+    private static func deepSeekProviderBlock(apiKey: String?) -> String {
+        let credentialLine = apiKey.flatMap { $0.isEmpty ? nil : "experimental_bearer_token = \(tomlString($0))" }
+            ?? "# API Key is supplied only after an explicit CodexBar unlock."
+        return """
+
+        # >>> CodexBar temporary DeepSeek providers (automatically restored on exit)
+        [model_providers.\(providerID)]
+        name = "DeepSeek (CodexBar)"
+        base_url = "https://api.deepseek.com/"
+        wire_api = "responses"
+        \(credentialLine)
+
+        # Compatibility alias for conversations created by early CodexBar builds.
+        [model_providers.\(legacyProviderID)]
+        name = "DeepSeek (CodexBar Legacy)"
+        base_url = "https://api.deepseek.com/"
+        wire_api = "responses"
+        \(credentialLine)
+
+        # Compatibility alias for DeepSeek's official setup script.
+        [model_providers.\(officialProviderID)]
+        name = "DeepSeek"
+        base_url = "https://api.deepseek.com/"
+        wire_api = "responses"
+        \(credentialLine)
+        # <<< CodexBar temporary DeepSeek providers
+        """
+    }
+
+    private static var managedProviderTables: Set<String> {
+        [
+            "model_providers.\(providerID)",
+            "model_providers.\(legacyProviderID)",
+            "model_providers.\(officialProviderID)"
+        ]
     }
 
     private func prepareSupportDirectory() throws {
@@ -264,13 +366,14 @@ private struct ProviderSwitchTransaction: Codable {
     enum Phase: String, Codable { case prepared, active }
     let version: Int
     var phase: Phase
-    let model: DeepSeekModel
+    var activeMode: ModelProviderMode?
+    var model: DeepSeekModel
     let activatedAt: Date
     let originalConfigExisted: Bool
     let originalConfig: Data
     let originalHash: String
     let originalPermissions: Int?
-    let appliedHash: String
+    var appliedHash: String
 }
 
 private struct ProviderLease: Codable {
@@ -300,6 +403,21 @@ private enum TOMLRootEditor {
         }
         while output.first?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true { output.removeFirst() }
         lines.removeAll(keepingCapacity: false)
+        return output.joined(separator: "\n")
+    }
+
+    static func removingTables(_ tableNames: Set<String>, from text: String) -> String {
+        var output: [String] = []
+        var skipping = false
+        for line in text.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("[") && trimmed.hasSuffix("]") && !trimmed.hasPrefix("#") {
+                let name = String(trimmed.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
+                skipping = tableNames.contains { name == $0 || name.hasPrefix($0 + ".") }
+            }
+            if !skipping { output.append(line) }
+        }
+        while output.last?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true { output.removeLast() }
         return output.joined(separator: "\n")
     }
 

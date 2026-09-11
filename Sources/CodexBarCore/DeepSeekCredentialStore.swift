@@ -74,16 +74,32 @@ public final class DeepSeekCredentialStore: @unchecked Sendable {
     }
 
     public func load() throws -> String? {
+        try load(interactionAllowed: true)
+    }
+
+    /// Reads the credential only when Keychain can return it without UI. This
+    /// is used for startup compatibility so an app update never creates a
+    /// repeated password prompt; an explicit provider switch may still call
+    /// `load()` and show the normal one-time macOS authorization if required.
+    public func loadNonInteractively() throws -> String? {
+        try load(interactionAllowed: false)
+    }
+
+    private func load(interactionAllowed: Bool) throws -> String? {
+        let context = LAContext()
+        context.interactionNotAllowed = !interactionAllowed
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseAuthenticationContext as String: context
         ]
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound { return nil }
+        if !interactionAllowed && status == errSecInteractionNotAllowed { return nil }
         guard status == errSecSuccess else { throw DeepSeekCredentialError.keychain(status) }
         guard let data = result as? Data, let key = String(data: data, encoding: .utf8) else {
             throw DeepSeekCredentialError.encoding

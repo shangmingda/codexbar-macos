@@ -35,11 +35,11 @@ DeepSeek 是可选模式，需要能访问 `api.deepseek.com` 与 `cdn.deepseek.
 
 ### 外接模型与回滚
 
-- OpenAI 模式的 `config.toml` 内容与切换前逐字节一致，原模型、推理强度、插件、MCP 与权限配置不会被改写。
-- DeepSeek Flash、Pro 与 `deepseek-v4-flash-vision-exp` 使用官方 Responses API 配置；Vision 实验模型按官方目录启用文本和图片输入。Codex Desktop 在 macOS 的原生模型选择器中可能显示 `Custom`。
-- Key 仅存 macOS 钥匙串；临时 DeepSeek 配置只包含同签名凭据助手的本机路径，不包含明文 Key。
+- OpenAI 模式的默认模型、provider、推理强度、插件、MCP 与权限配置不会被改写；CodexBar 活跃期间只追加临时 DeepSeek Provider 兼容段，退出后 `config.toml` 逐字节恢复。
+- DeepSeek-Flash 与 DeepSeek-V4-Pro 使用官方 Responses API 配置；Flash 按官方最新目录支持文本和图片输入。进入 DeepSeek Provider 后，两种模型通过 Codex Desktop 原生模型菜单直接切换；部分旧版客户端可能只显示 `Custom`。
+- Key 的持久来源仅为 macOS 钥匙串；CodexBar 活跃时按 DeepSeek 官方 `experimental_bearer_token` 协议写入权限为 0600 的临时租约，退出或看门狗恢复时删除临时内容并原样恢复配置。
 - 切换前先保存原配置快照，写入后再通过 Codex `config/read` 核验实际 provider 和模型；任何一步失败都回滚 OpenAI。
-- 正常退出由应用完成恢复；异常退出和登录残留由独立 watcher 恢复并重启 Codex。
+- 正常退出由应用完成恢复；异常退出和登录残留由独立 watcher 恢复配置，但不会自行退出或重启 Codex Desktop。
 - 两类 provider 的历史任务由 Codex 按认证方式分组；切回对应 provider 后重新显示，CodexBar 不删除任务文件。
 - DeepSeek 当前官方目录声明仅支持文本输入；带图片的任务应切回 OpenAI。
 
@@ -99,7 +99,7 @@ DeepSeek 是可选模式，需要能访问 `api.deepseek.com` 与 `cdn.deepseek.
 | 环境 | `swift --version` | Swift 6 可用 |
 | 编译 | `swift build` | 无 error / warning |
 | 逻辑测试 | `swift run codexbar-selftest` | 全部测试通过 |
-| 模型事务 | `swift run codexbar-selftest` | Flash/Pro/Vision、官方目录解析、逐字节恢复、无原配置恢复全部通过 |
+| 模型事务 | `swift run codexbar-selftest` | Flash/Pro、旧模型兼容、原生目录解析、逐字节恢复、无原配置恢复全部通过 |
 | 本机数据 | `swift run codexbar-diagnostics` | 返回额度和任务 JSON |
 | 安装 | `./scripts/install.sh` | 输出 `Installed` |
 | 签名 | `codesign --verify --deep --strict ~/Applications/CodexBar.app` | 退出码 0 |
