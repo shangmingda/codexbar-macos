@@ -636,8 +636,6 @@ private struct TaskRow: View {
                         .lineLimit(1)
                         .help("模型：\(task.model ?? task.providerDisplayName)")
                     Text(task.folderName).lineLimit(1)
-                    Text("·")
-                    Text(task.elapsedReferenceDate, style: .relative)
                 }
                 .font(.system(size: 10)).foregroundStyle(.secondary)
                 HStack(spacing: 5) {
@@ -649,6 +647,10 @@ private struct TaskRow: View {
                         Text("限额 \(TokenFormatter.compact(usage.consumedTokens))/\(TokenFormatter.compact(usage.limitTokens))（\(usage.usedPercent)%）")
                             .foregroundStyle(usage.hasReachedLimit ? Color.red : usage.needsClosingWarning ? Color.orange : Color.secondary)
                     }
+                    Spacer(minLength: 8)
+                    Text(task.elapsedReferenceDate, style: .relative)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
                 .font(.system(size: 9.5, weight: .medium, design: .rounded))
                 .foregroundStyle(.secondary)
