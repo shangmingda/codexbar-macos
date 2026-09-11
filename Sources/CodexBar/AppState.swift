@@ -156,11 +156,7 @@ final class AppState: ObservableObject {
                     self.refreshBudgetUsage()
                 }
                 if self.tick % 20 == 0 { self.refreshQuota() }
-                if self.tick % 20 == 0,
-                   DeepSeekBackgroundRefreshPolicy.shouldRefresh(
-                    hasKey: self.deepSeekKeyConfigured,
-                    activeProvider: self.providerStatus.mode
-                   ) {
+                if self.tick % 20 == 0, self.deepSeekSessionAPIKey != nil {
                     self.refreshDeepSeekBalance()
                 }
             }
@@ -587,7 +583,6 @@ final class AppState: ObservableObject {
 
     func refreshDeepSeekBalance() {
         guard deepSeekKeyConfigured,
-              providerStatus.mode == .deepSeek,
               let apiKey = deepSeekSessionAPIKey,
               !deepSeekRefreshInFlight else { return }
         deepSeekRefreshInFlight = true
@@ -684,9 +679,10 @@ final class AppState: ObservableObject {
                 deepSeekSessionAPIKey = apiKey
                 providerStatus = try providerManager.activateOpenAICompatibility(apiKey: apiKey)
                 startProviderLeaseHeartbeat()
-                providerNotice = apiKey == nil
-                    ? "历史 DeepSeek 对话已兼容；切换 DeepSeek 时再由你授权读取 Key"
-                    : "历史 DeepSeek 对话已兼容；切到 DeepSeek 后可在 Codex 原生菜单选模"
+                // Successful background compatibility setup is intentionally
+                // silent. The panel reserves notices for actionable outcomes.
+                providerNotice = nil
+                if apiKey != nil { refreshDeepSeekBalance() }
             } catch {
                 logger.warning("Non-interactive provider compatibility setup skipped: \(error.localizedDescription, privacy: .public)")
             }

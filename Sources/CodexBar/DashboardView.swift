@@ -49,20 +49,19 @@ struct DashboardView: View {
 
     private var hasSyncError: Bool { state.quotaError != nil || state.taskError != nil }
 
-    private var quotaModeLabel: String {
-        let labels = state.quotas.map { quota in
-            quota.shortLabel == "5h" ? "5 小时" : quota.shortLabel
-        }
-        guard !labels.isEmpty else { return "读取中" }
-        return labels.count == 1 ? "\(labels[0]) · 单窗口" : labels.joined(separator: " + ")
-    }
-
     private var nextResetCreditAutoUseAt: Date? {
         state.resetCredits.compactMap(\.autoUseEligibleAt).min()
     }
 
     private var resetCreditExpirySummary: String {
         state.resetCredits.map(\.expiryLabel).joined(separator: "、")
+    }
+
+    private var deepSeekPickerLabel: String {
+        guard let balance = state.deepSeekBalance else { return "DeepSeek" }
+        let preferred = balance.balances.first(where: { $0.currency == "CNY" }) ?? balance.balances.first
+        guard let preferred else { return "DeepSeek" }
+        return "DeepSeek · \(preferred.formattedTotal)"
     }
 
     private var header: some View {
@@ -231,7 +230,10 @@ struct DashboardView: View {
                 set: { requestProviderSwitch(to: $0, model: nil) }
             )) {
                 Text("OpenAI").tag(ModelProviderMode.openAI)
-                Text("DeepSeek").tag(ModelProviderMode.deepSeek)
+                Text(deepSeekPickerLabel)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+                    .tag(ModelProviderMode.deepSeek)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -272,18 +274,6 @@ struct DashboardView: View {
                         .foregroundStyle(.secondary)
                 }
                 .font(.system(size: 10.5, weight: .semibold))
-                HStack(spacing: 7) {
-                    Circle().fill(Color.green).frame(width: 5, height: 5)
-                    Text("已识别当前账号额度模式")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text(quotaModeLabel)
-                        .fontWeight(.semibold)
-                        .foregroundStyle(Color.green)
-                }
-                .font(.system(size: 9.5))
-                .padding(.horizontal, 9).padding(.vertical, 7)
-                .background(Color.green.opacity(0.07), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
                 ForEach(state.quotas) { quota in QuotaRow(quota: quota) }
             }
             .padding(13).background(cardBackground)
