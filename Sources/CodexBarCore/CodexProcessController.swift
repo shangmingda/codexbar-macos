@@ -80,8 +80,9 @@ public final class CodexProcessController: @unchecked Sendable {
             return
         }
         // Recovery may run from a timer or after CodexBar exits. Never terminate
-        // Codex from such a background path; refresh only the shared service and let
-        // the user restart the desktop app when convenient.
-        reloadSharedAppServer()
+        // Codex or its loaded shared service from such a background path.
+        if NSRunningApplication.runningApplications(withBundleIdentifier: Self.codexBundleIdentifier).isEmpty {
+            reloadSharedAppServer()
+        }
     }
 }

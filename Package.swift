@@ -9,7 +9,8 @@ let package = Package(
         .executable(name: "CodexBar", targets: ["CodexBar"]),
         .executable(name: "codexbar-diagnostics", targets: ["CodexBarDiagnostics"]),
         .executable(name: "codexbar-selftest", targets: ["CodexBarSelfTests"]),
-        .executable(name: "codexbar-watcher", targets: ["CodexBarWatcher"])
+        .executable(name: "codexbar-watcher", targets: ["CodexBarWatcher"]),
+        .executable(name: "codexbar-credential-helper", targets: ["CodexBarCredentialHelper"])
     ],
     targets: [
         .target(
@@ -22,6 +23,7 @@ let package = Package(
         .executableTarget(name: "CodexBar", dependencies: ["CodexBarCore"]),
         .executableTarget(name: "CodexBarDiagnostics", dependencies: ["CodexBarCore"]),
         .executableTarget(name: "CodexBarSelfTests", dependencies: ["CodexBarCore"]),
+        .executableTarget(name: "CodexBarCredentialHelper", dependencies: ["CodexBarCore"]),
         .executableTarget(name: "CodexBarWatcher", dependencies: ["CodexBarCore"])
     ],
     swiftLanguageModes: [.v5]

@@ -4,7 +4,35 @@ import Foundation
 
 @main
 struct CodexBarWatcherMain {
+    private static var quotaRecoveryService: QuotaRecoveryService?
     static func main() {
+        if let argument = CommandLine.arguments.first(where: { $0.hasPrefix("--test-recovery-deadline=") }),
+           let output = CommandLine.arguments.first(where: { $0.hasPrefix("--test-output=") }),
+           let seconds = Double(argument.dropFirst("--test-recovery-deadline=".count)), (10...60).contains(seconds) {
+            let directory = URL(fileURLWithPath: String(output.dropFirst("--test-output=".count)))
+            let reset = Date().addingTimeInterval(seconds - 180)
+            Task {
+                do {
+                    let service = try QuotaRecoveryService(directory: directory, client: GreetingDeadlineClient(), testMode: true, enabled: { true }, readWindows: {
+                        [QuotaWindow(id: "deadline-test", usedPercent: 25, durationMinutes: 300, resetsAt: reset)]
+                    })
+                    try await service.start()
+                    // Wait for eventual message readback, not just turn/start.
+                    for _ in 0..<Int(seconds + 60) {
+                        try await Task.sleep(nanoseconds: 1_000_000_000)
+                        let result = try QuotaRecoveryStore(fileURL: directory.appendingPathComponent("quota-recovery.json"))
+                        if result.cycles.first?.completedAt != nil { break }
+                    }
+                    await service.stop()
+                    let store = try QuotaRecoveryStore(fileURL: directory.appendingPathComponent("quota-recovery.json"))
+                    let job = store.cycles.first?.jobs.first
+                    print("scheduledTest=true sent=\(job?.confirmedAt != nil) outcome=\(store.cycles.first?.outcome ?? "pending")")
+                    exit(job?.confirmedAt == nil ? 1 : 0)
+                } catch { print("scheduledTest=false"); exit(1) }
+            }
+            RunLoop.current.run()
+            return
+        }
         if CommandLine.arguments.dropFirst().contains("--restore-only") {
             let configPath = CommandLine.arguments.first { $0.hasPrefix("--config=") }.map { String($0.dropFirst("--config=".count)) }
             let supportPath = CommandLine.arguments.first { $0.hasPrefix("--support=") }.map { String($0.dropFirst("--support=".count)) }
@@ -37,7 +65,40 @@ struct CodexBarWatcherMain {
         }
         let watcher = CodexLaunchWatcher(codexBarURL: URL(fileURLWithPath: CommandLine.arguments[1]))
         watcher.start()
+        Task {
+            do {
+                let service = try QuotaRecoveryService(enabled: {
+                    CFPreferencesAppSynchronize("com.smd.codexbar" as CFString)
+                    let enabled = CFPreferencesCopyAppValue("CodexBarQuotaRecoveryEnabled" as CFString, "com.smd.codexbar" as CFString) as? Bool ?? false
+                    guard enabled, ProviderConfigManager().status().mode == .openAI else { return false }
+                    return await MainActor.run {
+                        !NSRunningApplication.runningApplications(withBundleIdentifier: "com.smd.codexbar").isEmpty
+                    }
+                })
+                quotaRecoveryService = service
+                try await service.start()
+            } catch {
+                FileHandle.standardError.write(Data("Quota recovery service could not start\n".utf8))
+            }
+        }
         RunLoop.current.run()
+    }
+}
+
+/// Real submission/readback, but an isolated greeting-only task list. A short
+/// synthetic deadline must never resume the user's quota-interrupted tasks.
+private struct GreetingDeadlineClient: QuotaRecoveryClient {
+    private let client = AppServerControlClient()
+    func recoveryAccountKey() async throws -> String { try await client.recoveryAccountKey() }
+    func recoveryFailures(since: Date, quotaExhausted: Bool) async throws -> [QuotaRecoveryFailure] { [] }
+    func createRecoveryThread(cwd: String) async throws -> String { try await client.createRecoveryThread(cwd: cwd) }
+    func stillNeedsRecovery(_ failure: QuotaRecoveryFailure) async throws -> Bool { false }
+    func sendRecovery(job: QuotaRecoveryJob) async throws -> String { try await client.sendRecovery(job: job) }
+    func recoveryReceipt(threadID: String, messageID: String) async throws -> String? {
+        try await client.recoveryReceipt(threadID: threadID, messageID: messageID)
+    }
+    func recoveryExecution(threadID: String, turnID: String) async throws -> QuotaRecoveryExecution {
+        try await client.recoveryExecution(threadID: threadID, turnID: turnID)
     }
 }
 

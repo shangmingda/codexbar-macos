@@ -3,7 +3,7 @@ import Foundation
 
 @main
 struct SelfTests {
-    static func main() throws {
+    static func main() async throws {
         if let fixtureArgument = CommandLine.arguments.first(where: { $0.hasPrefix("--prepare-openai-compat-fixture=") }) {
             let root = URL(fileURLWithPath: String(fixtureArgument.dropFirst("--prepare-openai-compat-fixture=".count)), isDirectory: true)
             let configURL = root.appendingPathComponent("codex/config.toml")
@@ -40,6 +40,13 @@ struct SelfTests {
             print("fixture-ready")
             return
         }
+        if let scanArgument = CommandLine.arguments.first(where: { $0.hasPrefix("--scan-tool-pairing=") }) {
+            let url = URL(fileURLWithPath: String(scanArgument.dropFirst("--scan-tool-pairing=".count)))
+            let scan = try ThreadToolPairingRepair.scan(sessionAt: url)
+            print("deepseek=\(scan.containsDeepSeekProvider) interleaved=\(scan.interleavedLines.count) notices=\(scan.noticeLines.count)")
+            return
+        }
+
         var passed = 0
         func check(_ condition: @autoclosure () -> Bool, _ name: String) throws {
             guard condition() else {
@@ -272,6 +279,66 @@ struct SelfTests {
         try check(!LaunchCompanionPolicy.shouldLaunchCodexBar(codexIsRunning: false, codexBarIsRunning: false), "Codex 未运行时不误启动")
         try check(QuotaWindow(id: "a", usedPercent: 150, durationMinutes: 300, resetsAt: nil).remainingPercent == 0, "百分比上限保护")
         try check(QuotaWindow(id: "b", usedPercent: -1, durationMinutes: 300, resetsAt: nil).remainingPercent == 100, "百分比下限保护")
+        try check(NetworkSpeed.compact(0) == "0B/s" && NetworkSpeed.compact(1_500_000) == "1.5M/s", "状态栏网速单位紧凑显示")
+        try check(DingTalkWebhookStore.isValid("https://oapi.dingtalk.com/robot/send?access_token=test-value"), "钉钉官方机器人地址校验")
+        try check(!DingTalkWebhookStore.isValid("https://example.com/robot/send?access_token=test-value"), "拒绝非钉钉 Webhook 域名")
+        let resetNow = Date(timeIntervalSince1970: 1_790_000_000)
+        let oldDue = resetNow.addingTimeInterval(-10)
+        let laterDue = resetNow.addingTimeInterval(604_800)
+        let naturalOld = QuotaWindow(id: "codex-secondary-10080", usedPercent: 42, durationMinutes: 10_080, resetsAt: oldDue)
+        let naturalNew = QuotaWindow(id: naturalOld.id, usedPercent: 0, durationMinutes: 10_080, resetsAt: laterDue)
+        let natural = QuotaResetDetector.detect(previous: [naturalOld], current: [naturalNew], now: resetNow)
+        try check(natural.count == 1 && natural[0].kind == .scheduled, "周额度自然窗口轮换触发提醒")
+        let earlyOld = QuotaWindow(id: "codex-secondary-10080", usedPercent: 37, durationMinutes: 10_080, resetsAt: resetNow.addingTimeInterval(80_000))
+        let earlyNew = QuotaWindow(id: earlyOld.id, usedPercent: 0, durationMinutes: 10_080, resetsAt: earlyOld.resetsAt)
+        let early = QuotaResetDetector.detect(previous: [earlyOld], current: [earlyNew], now: resetNow)
+        try check(early.count == 1 && early[0].kind == .early, "官方提前清零可由额度快照识别")
+        let correction = QuotaWindow(id: earlyOld.id, usedPercent: 36, durationMinutes: 10_080, resetsAt: earlyOld.resetsAt)
+        try check(QuotaResetDetector.detect(previous: [earlyOld], current: [correction], now: resetNow).isEmpty, "小幅额度校正不误报重置")
+        let shortOld = QuotaWindow(id: "codex-primary-300", usedPercent: 42, durationMinutes: 300, resetsAt: oldDue)
+        let shortNew = QuotaWindow(id: shortOld.id, usedPercent: 0, durationMinutes: 300, resetsAt: resetNow.addingTimeInterval(18_000))
+        try check(QuotaResetDetector.detect(previous: [shortOld], current: [shortNew], now: resetNow).isEmpty, "5h 自然重置不通知")
+        let shortEarlyOld = QuotaWindow(id: shortOld.id, usedPercent: 42, durationMinutes: 300, resetsAt: shortNew.resetsAt)
+        try check(QuotaResetDetector.detect(previous: [shortEarlyOld], current: [shortNew], now: resetNow).isEmpty, "5h 提前清零不通知")
+        let idleOld = QuotaWindow(id: earlyOld.id, usedPercent: 0, durationMinutes: 10_080, resetsAt: laterDue)
+        let idleNew = QuotaWindow(id: earlyOld.id, usedPercent: 0, durationMinutes: 10_080, resetsAt: laterDue.addingTimeInterval(300))
+        try check(QuotaResetDetector.detect(previous: [idleOld], current: [idleNew], now: resetNow).isEmpty, "周额度 100% 时间随查询滚动不误报")
+        let driftingNew = QuotaWindow(id: earlyOld.id, usedPercent: 37, durationMinutes: 10_080, resetsAt: laterDue)
+        try check(QuotaResetDetector.detect(previous: [earlyOld], current: [driftingNew], now: resetNow).isEmpty, "周额度非零且只有重置时间后移不误报")
+        let tinyOld = QuotaWindow(id: earlyOld.id, usedPercent: 1, durationMinutes: 10_080, resetsAt: laterDue)
+        try check(QuotaResetDetector.detect(previous: [tinyOld], current: [idleOld], now: resetNow).isEmpty, "周额度 1% 到 0% 微小校正不误报")
+        let movedEarlyNew = QuotaWindow(id: earlyOld.id, usedPercent: 0, durationMinutes: 10_080, resetsAt: laterDue)
+        try check(QuotaResetDetector.detect(previous: [earlyOld], current: [movedEarlyNew], now: resetNow).first?.kind == .early, "周额度下降且重置时间变化仍识别提前重置")
+        try check(!QuotaResetDetector.shouldNotify(QuotaWindow(id: "unknown", usedPercent: 0, durationMinutes: nil, resetsAt: nil)), "未知额度周期不发送通知")
+        try await DingTalkResetNotifier(credentialStore: DingTalkWebhookStore(service: "codexbar-test-\(UUID().uuidString)", legacyService: nil)).send(event: QuotaResetEvent(window: shortNew, kind: .early, detectedAt: resetNow), keyword: "请注意")
+        try check(true, "发送边界拒绝 5h 事件且不读取钥匙串或请求网络")
+        let noticeURL = FileManager.default.temporaryDirectory.appendingPathComponent("codexbar-reset-notice-test-\(UUID().uuidString).json")
+        let noticeStore = try QuotaResetNoticeStore(fileURL: noticeURL)
+        let initialPending = try noticeStore.observe([naturalOld], now: resetNow)
+        try check(initialPending.isEmpty, "首次额度快照只建立基线")
+        try check(noticeStore.lastSnapshot?.windows == [naturalOld] && noticeStore.lastSnapshot?.observedAt == resetNow, "最近额度快照可用于短暂故障时展示缓存")
+        let pending = try noticeStore.observe([naturalNew], now: resetNow)
+        try check(pending.count == 1, "额度重置事件持久入队")
+        let restoredNoticeStore = try QuotaResetNoticeStore(fileURL: noticeURL)
+        try check(restoredNoticeStore.pending.count == 1, "应用重启后待发通知可恢复")
+        let repeatPending = try restoredNoticeStore.observe([naturalNew], now: resetNow.addingTimeInterval(300))
+        try check(repeatPending.count == 1, "周额度通知等待期间重复快照不重复入队")
+        try restoredNoticeStore.markDelivered(pending[0].id)
+        let finalPending = try restoredNoticeStore.observe([naturalNew], now: resetNow)
+        try check(finalPending.isEmpty, "通知成功后重复快照不重发")
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        var legacyJournal = try JSONSerialization.jsonObject(with: Data(contentsOf: noticeURL)) as! [String: Any]
+        legacyJournal["pending"] = try JSONSerialization.jsonObject(with: encoder.encode([
+            QuotaResetEvent(window: shortNew, kind: .early, detectedAt: resetNow),
+            QuotaResetEvent(window: naturalNew, kind: .scheduled, detectedAt: resetNow)
+        ]))
+        try JSONSerialization.data(withJSONObject: legacyJournal).write(to: noticeURL)
+        let migratedStore = try QuotaResetNoticeStore(fileURL: noticeURL)
+        try check(migratedStore.pending.count == 1 && migratedStore.pending[0].window.durationMinutes == 10_080, "升级清理旧版 5h 待发事件并保留周提醒")
+        let remigratedStore = try QuotaResetNoticeStore(fileURL: noticeURL)
+        try check(remigratedStore.pending.count == 1, "升级清理结果持久化且重启不恢复 5h 事件")
+        try? FileManager.default.removeItem(at: noticeURL)
 
         let balanceData = Data(#"{"is_available":true,"balance_infos":[{"currency":"CNY","total_balance":"110.25","granted_balance":"10.25","topped_up_balance":"100.00"}]}"#.utf8)
         let deepSeekBalance = try DeepSeekClient.parseBalance(balanceData)
@@ -332,13 +399,260 @@ struct SelfTests {
         let keychainTestStore = DeepSeekCredentialStore(service: "com.smd.codexbar.selftest.\(UUID().uuidString)", account: "temporary")
         try keychainTestStore.save("codexbar-selftest-key")
         try check(keychainTestStore.hasKey(), "DeepSeek Key 只读元数据即可判断存在")
+        let silentTestKey = try keychainTestStore.loadNonInteractively()
+        try check(silentTestKey == nil || silentTestKey == "codexbar-selftest-key", "DeepSeek 后台钥匙串读取无需授权弹窗")
         let loadedTestKey = try keychainTestStore.load()
         try check(loadedTestKey == "codexbar-selftest-key", "DeepSeek Key 可写入并读取 macOS 钥匙串")
         try keychainTestStore.delete()
         let deletedTestKey = try keychainTestStore.load()
         try check(deletedTestKey == nil, "DeepSeek Key 可从 macOS 钥匙串完整删除")
 
+        // Codex keeps a thread's provider when only the model is swapped in the
+        // native picker, so a DeepSeek model can stay routed to api.openai.com.
+        func bindingTask(_ id: String, model: String?, provider: String?) -> ActiveTask {
+            ActiveTask(
+                id: id,
+                title: "binding-\(id)",
+                objective: "",
+                cwd: "/tmp",
+                tokensUsed: 0,
+                timeUsedSeconds: 0,
+                updatedAt: Date(),
+                modelProvider: provider,
+                model: model
+            )
+        }
+        try check(
+            bindingTask("a", model: "deepseek-flash", provider: "openai").providerBindingIssue
+                == .deepSeekModelOnOpenAIProvider(model: "deepseek-flash"),
+            "识别 DeepSeek 模型挂在 OpenAI Provider 的错配"
+        )
+        try check(
+            bindingTask("b", model: "deepseek-v4-flash-vision-exp", provider: "openai-http").providerBindingIssue?.isDeepSeekModelOnOpenAIProvider == true,
+            "旧版 DeepSeek slug 同样被识别为错配"
+        )
+        try check(
+            bindingTask("c", model: "gpt-5.6-sol", provider: "codexbar_deepseek").providerBindingIssue
+                == .openAIModelOnDeepSeekProvider(model: "gpt-5.6-sol"),
+            "识别 OpenAI 模型挂在 DeepSeek Provider 的错配"
+        )
+        try check(bindingTask("d", model: "deepseek-flash", provider: "codexbar_deepseek").providerBindingIssue == nil, "正常 DeepSeek 任务不报错配")
+        try check(bindingTask("e", model: "gpt-5.6-sol", provider: "openai-http").providerBindingIssue == nil, "正常 OpenAI 任务不报错配")
+        try check(bindingTask("f", model: "deepseek-v4-pro", provider: "deepseek").providerBindingIssue == nil, "DeepSeek 官方 Provider 任务不报错配")
+        try check(bindingTask("g", model: nil, provider: nil).providerBindingIssue == nil, "缺少模型信息时不误报")
+        try check(bindingTask("h", model: "gpt-5.6-sol", provider: "openai").providerBindingIssue == nil, "OpenAI 自家人工组合不误报")
+
+        // Parallel tool calls must be serialised for DeepSeek: the endpoint
+        // loses the second output and then replays the broken pair forever.
+        let parallelCatalog = Data(#"{"models":[{"slug":"deepseek-flash","supports_parallel_tool_calls":true,"input_modalities":["text","image"]},{"slug":"deepseek-v4-pro","supports_parallel_tool_calls":true}]}"#.utf8)
+        let normalizedCatalog = try ProviderConfigManager.normalizingCatalog(parallelCatalog)
+        let normalizedObject = try unwrap(try JSONSerialization.jsonObject(with: normalizedCatalog) as? [String: Any], "规范化目录可解析")
+        let normalizedModels = try unwrap(normalizedObject["models"] as? [[String: Any]], "规范化目录仍包含 models")
+        try check(normalizedModels.count == 2, "目录规范化保留全部 DeepSeek 模型")
+        try check(
+            normalizedModels.allSatisfy { ($0["supports_parallel_tool_calls"] as? Bool) == false },
+            "DeepSeek 目录关闭并行工具调用"
+        )
+        try check(
+            (normalizedModels.first?["input_modalities"] as? [String])?.contains("image") == true,
+            "目录规范化不改动模型的其余能力字段"
+        )
+        let slugOnlyCatalog = try ProviderConfigManager.normalizingCatalog(minimalCatalog)
+        try check(slugOnlyCatalog.count > 0, "仅含 slug 的历史目录同样可以规范化")
+        try check(
+            normalizedModels.allSatisfy { $0["base_instructions"] == nil },
+            "缺少 base_instructions 的目录不注入空提示"
+        )
+
+        // 仅关闭并行标记还不够：DeepSeek 仍会在一条消息里请求多张图片，而客户端把
+        // <image_resize_notice> 插在工具输出之间就会破坏配对。因此目录同时写入串行规则。
+        let instructionCatalog = Data(#"{"models":[{"slug":"deepseek-flash","base_instructions":"BASE-PROMPT","supports_parallel_tool_calls":true}]}"#.utf8)
+        let instructedCatalog = try ProviderConfigManager.normalizingCatalog(instructionCatalog)
+        let instructedObject = try unwrap(try JSONSerialization.jsonObject(with: instructedCatalog) as? [String: Any], "注入串行规则的目录可解析")
+        let instructedModels = try unwrap(instructedObject["models"] as? [[String: Any]], "注入串行规则后仍包含 models")
+        let instructedPrompt = try unwrap(instructedModels.first?["base_instructions"] as? String, "模型保留 base_instructions")
+        try check(instructedPrompt.hasPrefix("BASE-PROMPT"), "注入串行规则时保留原 base_instructions")
+        try check(instructedPrompt.contains("## CodexBar tool-call rule"), "DeepSeek 目录写入串行工具调用规则")
+        try check(instructedPrompt.contains("at most one tool call per assistant turn"), "串行规则明确限制每轮一次工具调用")
+        let twiceCatalog = try ProviderConfigManager.normalizingCatalog(instructedCatalog)
+        let twiceObject = try unwrap(try JSONSerialization.jsonObject(with: twiceCatalog) as? [String: Any], "重复规范化的目录可解析")
+        let twiceModels = try unwrap(twiceObject["models"] as? [[String: Any]], "重复规范化后仍包含 models")
+        let twicePrompt = try unwrap(twiceModels.first?["base_instructions"] as? String, "重复规范化保留提示")
+        let markerCount = twicePrompt.components(separatedBy: "## CodexBar tool-call rule").count - 1
+        try check(markerCount == 1, "重复规范化不会叠加串行工具调用规则")
+
+        // 真正被客户端发送的是 model_messages.instructions_template：只写 base_instructions
+        // 时模型看不到规则（实测 3/3 仍然并行请求两张图），写进模板后降为 0~1 次。
+        let templateCatalog = Data(#"{"models":[{"slug":"deepseek-flash","base_instructions":"BASE","model_messages":{"instructions_template":"TEMPLATE-PROMPT","instructions_variables":[]}}]}"#.utf8)
+        let templateNormalized = try ProviderConfigManager.normalizingCatalog(templateCatalog)
+        let templateObject = try unwrap(try JSONSerialization.jsonObject(with: templateNormalized) as? [String: Any], "含 model_messages 的目录可解析")
+        let templateModels = try unwrap(templateObject["models"] as? [[String: Any]], "含 model_messages 的目录保留 models")
+        let messages = try unwrap(templateModels.first?["model_messages"] as? [String: Any], "model_messages 被保留")
+        let template = try unwrap(messages["instructions_template"] as? String, "instructions_template 被保留")
+        try check(template.hasPrefix("TEMPLATE-PROMPT"), "注入规则时保留原 instructions_template")
+        try check(template.contains("## CodexBar tool-call rule"), "串行规则写入 instructions_template")
+        try check((messages["instructions_variables"] as? [Any]) != nil, "model_messages 其余字段不被改动")
+        let templateTwice = try ProviderConfigManager.normalizingCatalog(templateNormalized)
+        let templateTwiceModels = try unwrap(try (JSONSerialization.jsonObject(with: templateTwice) as? [String: Any])?["models"] as? [[String: Any]], "重复规范化模板目录可解析")
+        let templateTwiceMessages = try unwrap(templateTwiceModels.first?["model_messages"] as? [String: Any], "重复规范化保留 model_messages")
+        let templateTwiceText = try unwrap(templateTwiceMessages["instructions_template"] as? String, "重复规范化保留模板")
+        try check(
+            templateTwiceText.components(separatedBy: "## CodexBar tool-call rule").count - 1 == 1,
+            "重复规范化不会叠加 instructions_template 规则"
+        )
+        let noTemplateCatalog = Data(#"{"models":[{"slug":"deepseek-flash","model_messages":{"instructions_variables":[]}}]}"#.utf8)
+        let noTemplateNormalized = try ProviderConfigManager.normalizingCatalog(noTemplateCatalog)
+        let noTemplateModels = try unwrap(try (JSONSerialization.jsonObject(with: noTemplateNormalized) as? [String: Any])?["models"] as? [[String: Any]], "无模板目录可解析")
+        let noTemplateMessages = try unwrap(noTemplateModels.first?["model_messages"] as? [String: Any], "无模板目录保留 model_messages")
+        try check(noTemplateMessages["instructions_template"] == nil, "缺少 instructions_template 时不注入字符串")
+
+        // 截图压缩提示是损坏配对的唯一直接触发点：规则里必须包含"看图前先缩小"的操作步骤。
+        try check(instructedPrompt.contains("sips --resampleHeightWidthMax 2048"), "串行规则包含截图预缩小步骤")
+        try check(instructedPrompt.contains("2048 pixels"), "串行规则说明 2048 像素阈值")
+
+        // 坏配对检测与修复：构造与真实 rollout 同构的会话文件。
+        let pairingRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("codexbar-pairing-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: pairingRoot, withIntermediateDirectories: true)
+        let sessionURL = pairingRoot.appendingPathComponent("rollout-2026-09-12T15-33-15-019f0000-0000-7000-8000-00000000abcd.jsonl")
+        func sessionLine(_ payload: [String: Any]) -> String {
+            let object: [String: Any] = [
+                "timestamp": "2026-09-12T13:06:47.000Z",
+                "type": "response_item",
+                "payload": payload
+            ]
+            let data = try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+            return String(data: data, encoding: .utf8)!
+        }
+        let calls = "deepseek-flash codexbar_deepseek view_image"
+        let lines = [
+            sessionLine(["type": "function_call", "call_id": "call_a", "name": "view_image"]),
+            sessionLine(["type": "function_call", "call_id": "call_b", "name": "view_image"]),
+            sessionLine(["type": "function_call_output", "call_id": "call_a", "output": calls]),
+            sessionLine(["type": "message", "role": "developer", "content": [["type": "input_text", "text": "<image_resize_notice> resized </image_resize_notice>"]]]),
+            sessionLine(["type": "function_call_output", "call_id": "call_b", "output": calls]),
+            sessionLine(["type": "message", "role": "developer", "content": [["type": "input_text", "text": "<image_resize_notice> trailing </image_resize_notice>"]]])
+        ]
+        try (lines.joined(separator: "\n") + "\n").write(to: sessionURL, atomically: true, encoding: .utf8)
+        let scan = try ThreadToolPairingRepair.scan(sessionAt: sessionURL)
+        try check(scan.containsDeepSeekProvider, "会话扫描识别 DeepSeek Provider")
+        try check(scan.interleavedLines.count == 1, "只把夹在两条工具输出之间的项判为坏配对")
+        try check(scan.noticeLines.count == 1, "坏配对里只有压缩提示可安全删除")
+        try check(ThreadToolPairingRepair.threadID(fromSessionFile: sessionURL) == "019f0000-0000-7000-8000-00000000abcd", "从会话文件名解析线程标识")
+
+        let candidates = ThreadToolPairingRepair.scanSessions(root: pairingRoot, codexHome: pairingRoot)
+        try check(candidates.count == 1, "会话目录扫描能找到坏配对")
+        try check(candidates.first?.removableNotices == 1, "候选记录携带可删除提示数量")
+        guard let candidate = candidates.first else { throw TestFailure.failed("缺少坏配对候选") }
+        let backupRoot = pairingRoot.appendingPathComponent("backups", isDirectory: true)
+        let record = try ThreadToolPairingRepair.repair(candidate: candidate, backupRoot: backupRoot, supportDirectory: pairingRoot)
+        try check(record.removedItems == 1, "修复删除 1 条夹在中间的输出提示")
+        try check(FileManager.default.fileExists(atPath: record.backupPath), "修复前保留会话文件备份")
+        let repaired = try ThreadToolPairingRepair.scan(sessionAt: sessionURL)
+        try check(repaired.noticeLines.isEmpty && repaired.interleavedLines.isEmpty, "修复后不再存在坏配对")
+        let journalURL = pairingRoot.appendingPathComponent(ThreadToolPairingRepair.journalFileName)
+        let pairingJournalPermissions = (try? FileManager.default.attributesOfItem(atPath: journalURL.path)[.posixPermissions] as? NSNumber)?.intValue
+        try check(pairingJournalPermissions == 0o600, "坏配对修复日志权限为 0600")
+        let secondRecord = try ThreadToolPairingRepair.repair(candidate: candidate, backupRoot: backupRoot, supportDirectory: pairingRoot)
+        try check(secondRecord.removedItems == 0, "重复修复不再改动会话文件")
+        try? FileManager.default.removeItem(at: pairingRoot)
+
+        // Repair writes exactly one thread row, keeps a journal and verifies the
+        // result by read-back.
+        let repairRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("codexbar-repair-\(UUID().uuidString)", isDirectory: true)
+        let repairCodexHome = repairRoot.appendingPathComponent("codex", isDirectory: true)
+        let repairSupport = repairRoot.appendingPathComponent("support", isDirectory: true)
+        try FileManager.default.createDirectory(at: repairCodexHome, withIntermediateDirectories: true)
+        let repairDatabase = repairCodexHome.appendingPathComponent("state_5.sqlite")
+        let mismatchedID = "019f595e-797b-7893-bc40-35e1afe0fd1b"
+        let untouchedID = "019f6509-52dd-7e50-844e-fb8d37cd37a2"
+        try runSQLite(
+            database: repairDatabase,
+            sql: """
+            CREATE TABLE threads (id TEXT PRIMARY KEY, model TEXT, model_provider TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', preview TEXT NOT NULL DEFAULT '', archived INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0, updated_at_ms INTEGER);
+            INSERT INTO threads (id, model, model_provider, title, updated_at_ms) VALUES ('\(mismatchedID)','deepseek-flash','openai','错配的旧对话',1789141473000);
+            INSERT INTO threads (id, model, model_provider, title, updated_at_ms) VALUES ('\(untouchedID)','gpt-5.6-sol','openai-http','正常对话',1789000000000);
+            INSERT INTO threads (id, model, model_provider, title, archived, updated_at_ms) VALUES ('019f0000-0000-0000-0000-00000000000a','deepseek-flash','openai','已归档对话',1789141473000, 1);
+            """
+        )
+        let repairStore = ThreadProviderRepairStore(codexHome: repairCodexHome, supportDirectory: repairSupport)
+        let scanned = try repairStore.findMismatchedThreads()
+        try check(scanned.count == 1 && scanned.first?.id == mismatchedID, "线程库扫描只命中错配且未归档的对话")
+        try check(scanned.first?.issue == .deepSeekModelOnOpenAIProvider(model: "deepseek-flash"), "线程库扫描给出正确的错配类型")
+        try check(scanned.first?.title == "错配的旧对话", "线程库扫描带回可读标题")
+        let repairRecord = try repairStore.repair(threadID: mismatchedID, provider: ProviderConfigManager.providerID)
+        try check(
+            repairRecord.previousProvider == "openai" && repairRecord.appliedProvider == ProviderConfigManager.providerID,
+            "线程修复记录原始与目标 Provider"
+        )
+        let repairedRows = try querySQLite(database: repairDatabase, sql: "SELECT id, model, model_provider FROM threads ORDER BY id;")
+        try check(repairedRows.count == 3, "线程修复不新增或删除线程行")
+        let repairedTarget = try unwrap(repairedRows.first { ($0["id"] as? String) == mismatchedID }, "修复后的目标线程仍存在")
+        try check(
+            (repairedTarget["model_provider"] as? String) == ProviderConfigManager.providerID
+                && (repairedTarget["model"] as? String) == "deepseek-flash",
+            "线程修复只改 Provider 并保留用户选择的模型"
+        )
+        let untouchedRow = try unwrap(repairedRows.first { ($0["id"] as? String) == untouchedID }, "未涉及的线程仍存在")
+        try check(
+            (untouchedRow["model_provider"] as? String) == "openai-http" && (untouchedRow["model"] as? String) == "gpt-5.6-sol",
+            "线程修复不触碰其他线程"
+        )
+        let journalData = try Data(contentsOf: repairStore.journalURL)
+        let journalText = String(data: journalData, encoding: .utf8) ?? ""
+        try check(journalText.contains(mismatchedID) && journalText.contains("openai"), "线程修复留下可追溯的备份日志")
+        let journalPermissions = (try FileManager.default.attributesOfItem(atPath: repairStore.journalURL.path)[.posixPermissions]) as? Int
+        try check(journalPermissions == 0o600, "修复日志权限为 0600")
+        let rescan = try repairStore.findMismatchedThreads()
+        try check(rescan.isEmpty, "修复后线程库扫描不再报错配")
+        let repairedModel = try repairStore.repair(
+            threadID: untouchedID,
+            model: "deepseek-flash",
+            provider: ProviderConfigManager.providerID
+        )
+        try check(repairedModel.appliedModel == "deepseek-flash", "线程修复可以同时指定目标模型")
+        do {
+            _ = try repairStore.repair(threadID: "not-a-thread-id", provider: ProviderConfigManager.providerID)
+            try check(false, "非法线程标识必须被拒绝")
+        } catch {
+            try check(true, "非法线程标识必须被拒绝")
+        }
+        do {
+            _ = try repairStore.repair(threadID: "019f0000-0000-0000-0000-000000000009", provider: ProviderConfigManager.providerID)
+            try check(false, "不存在的线程必须被拒绝")
+        } catch {
+            try check(true, "不存在的线程必须被拒绝")
+        }
+        try? FileManager.default.removeItem(at: repairRoot)
+
+        for (condition, name) in try await QuotaRecoveryTests.run() { try check(condition, name) }
+        for (condition, name) in try CredentialAccessTests.run() { try check(condition, name) }
         print("\n\(passed) 项测试全部通过")
+    }
+
+    private static func runSQLite(database: URL, sql: String) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = [database.path, sql]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { throw TestFailure.failed("sqlite3 执行失败") }
+    }
+
+    private static func querySQLite(database: URL, sql: String) throws -> [[String: Any]] {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = ["-readonly", "-json", database.path, sql]
+        process.standardOutput = output
+        process.standardError = Pipe()
+        try process.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]) ?? []
     }
 
     private static func unwrap<T>(_ value: T?, _ name: String) throws -> T {

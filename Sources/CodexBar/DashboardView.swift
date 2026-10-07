@@ -8,10 +8,13 @@ struct DashboardView: View {
     @State private var showResetCreditAutoUseConfirmation = false
     @State private var showResetCreditDetails = false
     @State private var showDeepSeekKeyConfiguration = false
+    @State private var showDingTalkResetConfiguration = false
+    @State private var showAuthorSupport = false
     @State private var showProviderRestartConfirmation = false
     @State private var pendingProviderMode: ModelProviderMode?
     @State private var pendingDeepSeekModel: DeepSeekModel?
     @State private var pendingTaskToOpen: ActiveTask?
+    @State private var pendingProviderBindingTask: ActiveTask?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -19,6 +22,7 @@ struct DashboardView: View {
             ScrollView {
                 VStack(spacing: 14) {
                     quotaSection
+                    quotaRecoverySection
                     taskSection
                     if !state.resetCredits.isEmpty {
                         resetCreditSection
@@ -33,6 +37,10 @@ struct DashboardView: View {
         .sheet(isPresented: $showDeepSeekKeyConfiguration) {
             DeepSeekKeyConfigurationView(state: state)
         }
+        .sheet(isPresented: $showDingTalkResetConfiguration) {
+            DingTalkResetConfigurationView(state: state)
+        }
+        .sheet(isPresented: $showAuthorSupport) { AuthorSupportView() }
         .alert(providerSwitchConfirmationTitle, isPresented: $showProviderRestartConfirmation) {
             Button("取消，保持当前模型", role: .cancel) {
                 pendingProviderMode = nil
@@ -44,6 +52,22 @@ struct DashboardView: View {
             }
         } message: {
             Text(providerSwitchConfirmationMessage)
+        }
+        .alert(
+            "模型与 Provider 不匹配",
+            isPresented: Binding(
+                get: { pendingProviderBindingTask != nil },
+                set: { if !$0 { pendingProviderBindingTask = nil } }
+            ),
+            presenting: pendingProviderBindingTask
+        ) { task in
+            Button("取消", role: .cancel) { pendingProviderBindingTask = nil }
+            Button(task.providerBindingIssue?.repairActionTitle ?? "修复绑定") {
+                pendingProviderBindingTask = nil
+                state.repairProviderBinding(for: task)
+            }
+        } message: { task in
+            Text(task.providerBindingIssue?.detail ?? "")
         }
     }
 
@@ -143,6 +167,34 @@ struct DashboardView: View {
         }
     }
 
+    private var quotaRecoverySection: some View {
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: "arrow.trianglehead.clockwise")
+                .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                .padding(.top, 3)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("额度重置后自动续聊").font(.system(size: 10.5, weight: .semibold))
+                    Spacer()
+                    if state.quotaRecoveryEnabled, let at = state.quotaRecoveryAt {
+                        Text(at, format: .dateTime.hour().minute())
+                            .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Text(state.quotaRecoveryEnabled ? state.quotaRecoveryNotice : "重置 +3 分钟 · 优先继续额度中断任务")
+                    .font(.system(size: 9.5)).foregroundStyle(state.quotaRecoveryEnabled && state.quotaRecoveryNeedsAttention ? Color.orange : Color.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Toggle("额度重置后自动续聊", isOn: Binding(
+                get: { state.quotaRecoveryEnabled }, set: { state.setQuotaRecoveryEnabled($0) }
+            )).labelsHidden().toggleStyle(.switch).controlSize(.mini)
+        }
+        .padding(.horizontal, 11).padding(.vertical, 9)
+        .background(cardBackground)
+        .help("按真实 5 小时重置时间等待 3 分钟；有额度中断任务则在原对话继续，否则新建对话发送“你好”。Mac 和 CodexBar 需保持运行。")
+    }
+
     private var resetCreditAutoUseBinding: Binding<Bool> {
         Binding(
             get: { state.autoUseResetCreditsEnabled },
@@ -217,6 +269,12 @@ struct DashboardView: View {
             HStack {
                 sectionLabel("可用额度", icon: "gauge.with.dots.needle.50percent")
                 Spacer()
+                Button { showDingTalkResetConfiguration = true } label: {
+                    Image(systemName: state.dingTalkConfigured ? "bell.badge" : "bell")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(.borderless)
+                .help("周额度重置钉钉提醒")
                 Button { showDeepSeekKeyConfiguration = true } label: {
                     Label("配置", systemImage: "key.horizontal")
                 }
@@ -275,6 +333,11 @@ struct DashboardView: View {
                 }
                 .font(.system(size: 10.5, weight: .semibold))
                 ForEach(state.quotas) { quota in QuotaRow(quota: quota) }
+                if state.quotaSnapshotStale {
+                    Label(state.quotaError ?? "显示最近一次成功同步的额度", systemImage: "clock.arrow.circlepath")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.orange)
+                }
             }
             .padding(13).background(cardBackground)
         }
@@ -409,6 +472,12 @@ struct DashboardView: View {
     }
 
     private func requestTaskOpen(_ task: ActiveTask) {
+        // Opening a mismatched conversation only leads to a 401 on the next
+        // send, so route the click to the repair explanation instead.
+        if task.providerBindingIssue != nil {
+            pendingProviderBindingTask = task
+            return
+        }
         switch state.taskOpenRoute(for: task) {
         case .direct:
             state.openTask(task)
@@ -447,6 +516,12 @@ struct DashboardView: View {
                     .foregroundStyle(state.tasks.isEmpty ? .secondary : .primary)
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(Color.primary.opacity(0.07), in: Capsule())
+            }
+            if !state.providerBindingAlerts.isEmpty || state.providerRepairNotice != nil {
+                providerBindingBanner
+            }
+            if !state.toolPairingAlerts.isEmpty || state.toolPairingNotice != nil {
+                toolPairingBanner
             }
             if let notice = state.budgetNotice {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -509,6 +584,9 @@ struct DashboardView: View {
             .disabled(state.isRefreshing)
             Button { state.openCodex() } label: { Label("打开 Codex", systemImage: "arrow.up.forward.app") }
             Spacer()
+            Button { showAuthorSupport = true } label: { Image(systemName: "bubble.left") }
+                .help("给我提建议 · 支持作者")
+                .accessibilityLabel("给我提建议与支持作者")
             if let updated = state.lastUpdated {
                 Text(updated, style: .time).font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
             }
@@ -525,6 +603,87 @@ struct DashboardView: View {
         Label(title, systemImage: icon)
             .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(.secondary)
+    }
+
+    private var providerBindingBanner: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let notice = state.providerRepairNotice {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Label(notice, systemImage: "wrench.and.screwdriver")
+                        .font(.system(size: 10.5))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    Button("关闭") { state.dismissProviderRepairNotice() }
+                        .buttonStyle(.borderless)
+                        .font(.system(size: 10.5, weight: .semibold))
+                }
+            }
+            if !state.providerBindingAlerts.isEmpty {
+                Label(
+                    "\(state.providerBindingAlerts.count) 条任务的模型与 Provider 不匹配，发送时会直接失败",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.system(size: 10.5, weight: .medium))
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                ForEach(Array(state.providerBindingAlerts.prefix(3))) { candidate in
+                    HStack(spacing: 6) {
+                        Text(candidate.title).font(.system(size: 10.5)).lineLimit(1)
+                        Spacer(minLength: 4)
+                        Button(candidate.issue.repairActionTitle) {
+                            state.repairProviderBinding(for: candidate)
+                        }
+                        .buttonStyle(.borderless)
+                        .font(.system(size: 10.5, weight: .semibold))
+                    }
+                }
+            }
+        }
+        .foregroundStyle(.orange)
+        .padding(.horizontal, 10).padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private var toolPairingBanner: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let notice = state.toolPairingNotice {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Label(notice, systemImage: "wrench.and.screwdriver")
+                        .font(.system(size: 10.5))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    Button("关闭") { state.dismissToolPairingNotice() }
+                        .buttonStyle(.borderless)
+                        .font(.system(size: 10.5, weight: .semibold))
+                }
+            }
+            if !state.toolPairingAlerts.isEmpty {
+                Label(
+                    "\(state.toolPairingAlerts.count) 条 DeepSeek 任务的工具配对已损坏，每一轮都会报 No tool output found",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.system(size: 10.5, weight: .medium))
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+                ForEach(Array(state.toolPairingAlerts.prefix(3))) { candidate in
+                    HStack(spacing: 6) {
+                        Text(candidate.title).font(.system(size: 10.5)).lineLimit(1)
+                        Spacer(minLength: 4)
+                        Button("修复历史") { state.repairToolPairing(for: candidate) }
+                            .buttonStyle(.borderless)
+                            .font(.system(size: 10.5, weight: .semibold))
+                    }
+                }
+                Text("修复只剔除夹在工具输出之间的压缩提示，随后重启 Codex 桌面端即可继续该任务。")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .foregroundStyle(.orange)
+        .padding(.horizontal, 10).padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     private var cardBackground: some View {
@@ -906,6 +1065,75 @@ private struct DeepSeekKeyConfigurationView: View {
         state.saveDeepSeekKey(apiKey) { succeeded in
             if succeeded { dismiss() }
         }
+    }
+}
+
+private struct DingTalkResetConfigurationView: View {
+    @ObservedObject var state: AppState
+    @Environment(\.dismiss) private var dismiss
+    @State private var webhook = ""
+    @State private var keyword = "请注意"
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            HStack(spacing: 9) {
+                Image(systemName: "bell.badge.fill")
+                    .font(.system(size: 20))
+                    .foregroundStyle(Color.accentColor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("周额度重置提醒")
+                        .font(.system(size: 15, weight: .semibold))
+                    Text(state.dingTalkConfigured ? "已接入本机钉钉机器人" : "配置钉钉自定义机器人")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
+            Text("仅周额度自然重置或检测到提前重置后发送一次提醒，5h 额度不通知。额度约每分钟检查一次。")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("机器人 Webhook")
+                    .font(.system(size: 10.5, weight: .medium))
+                SecureField(state.dingTalkConfigured ? "已保存；留空则不更换" : "粘贴钉钉 Webhook 地址", text: $webhook)
+                    .textFieldStyle(.roundedBorder)
+            }
+            VStack(alignment: .leading, spacing: 5) {
+                Text("通知关键字")
+                    .font(.system(size: 10.5, weight: .medium))
+                TextField("请注意", text: $keyword)
+                    .textFieldStyle(.roundedBorder)
+            }
+            Text("Webhook 仅保存在本机钥匙串；已有的求助提醒配置可直接使用。关键字会放在每条通知开头。")
+                .font(.system(size: 9.5))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let notice = state.dingTalkNotice {
+                Text(notice)
+                    .font(.system(size: 10))
+                    .foregroundStyle(notice.contains("失败") || notice.contains("无法") ? .orange : .secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                Button("发送测试") { state.testDingTalkConfiguration() }
+                    .disabled(!state.dingTalkConfigured)
+                Spacer()
+                Button("关闭") { dismiss() }
+                Button("保存") {
+                    if state.saveDingTalkConfiguration(webhook: webhook, keyword: keyword) { webhook = "" }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(keyword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(18)
+        .frame(width: 350)
+        .onAppear { keyword = state.dingTalkKeyword }
     }
 }
 

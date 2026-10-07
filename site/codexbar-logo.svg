@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">CodexBar</title>
+  <desc id="desc">以字母 C、状态横条和实时指示点组合成的 CodexBar 标志</desc>
+  <defs>
+    <linearGradient id="surface" x1="10" y1="7" x2="54" y2="59" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#C9CFD7"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="3" stdDeviation="3" flood-color="#000000" flood-opacity=".24"/>
+    </filter>
+  </defs>
+  <rect x="4" y="4" width="56" height="56" rx="17" fill="url(#surface)" filter="url(#shadow)"/>
+  <path d="M42.5 18.8A18 18 0 1 0 42.5 45.2" fill="none" stroke="#11151A" stroke-width="7" stroke-linecap="round"/>
+  <path d="M31.5 32H45.5" fill="none" stroke="#11151A" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="48.5" cy="32" r="4.7" fill="#37D96B" stroke="#F6F8FA" stroke-width="2.4"/>
+</svg>

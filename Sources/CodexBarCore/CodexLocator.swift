@@ -3,8 +3,12 @@ import Foundation
 public enum CodexLocator {
     public static func executableURL(fileManager: FileManager = .default) -> URL? {
         let candidates = [
+            "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+            "/Applications/Codex.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
             "/Applications/ChatGPT.app/Contents/Resources/codex",
             "/Applications/Codex.app/Contents/Resources/codex",
+            NSHomeDirectory() + "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+            NSHomeDirectory() + "/Applications/Codex.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
             NSHomeDirectory() + "/Applications/ChatGPT.app/Contents/Resources/codex",
             NSHomeDirectory() + "/Applications/Codex.app/Contents/Resources/codex",
             "/opt/homebrew/bin/codex",

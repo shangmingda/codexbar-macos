@@ -4,6 +4,143 @@ import Foundation
 @main
 struct Diagnostics {
     static func main() async {
+        if CommandLine.arguments.contains("--migrate-stable-credentials") {
+            do { try CredentialMigration.run(); exit(0) }
+            catch { print("stableCredentialMigrationFailed=true"); exit(1) }
+        }
+        if CommandLine.arguments.contains("--recovery-submission-readiness") {
+            do {
+                let client = AppServerControlClient()
+                let path = CommandLine.arguments.first { $0.hasPrefix("--journal-path=") }.map { String($0.dropFirst("--journal-path=".count)) }
+                let store = try QuotaRecoveryStore(fileURL: path.map { URL(fileURLWithPath: $0) } ?? QuotaRecoveryStore.defaultURL)
+                for cycle in store.cycles where cycle.completedAt == nil {
+                    for job in cycle.jobs where !job.resolved && job.sendingAt == nil {
+                        do { _ = try await client.sendRecovery(job: job, validateOnly: true); print("thread=\(job.threadID ?? "unknown") submissionReady=true") }
+                        catch { print("thread=\(job.threadID ?? "unknown") submissionReady=false reason=\(error.localizedDescription)") }
+                    }
+                }
+                exit(0)
+            } catch { print("readinessUnavailable=true"); exit(1) }
+        }
+        if CommandLine.arguments.contains("--recovery-pending-decisions") {
+            do {
+                let client = AppServerControlClient()
+                for cycle in try QuotaRecoveryStore().cycles where cycle.completedAt == nil {
+                    for job in cycle.jobs where !job.resolved {
+                        guard let failure = job.failure else { continue }
+                        let decision = try await client.recoveryDecision(failure)
+                        print("thread=\(failure.threadID) resume=\(decision.shouldResume) reason=\(decision.reason) model=\(decision.updatedFailure?.model ?? failure.model ?? "unknown") effort=\(decision.updatedFailure?.effort ?? failure.effort ?? "unknown") latestTurn=\(decision.updatedFailure?.turnID ?? failure.turnID)")
+                    }
+                }
+                exit(0)
+            } catch { print("pendingDecisionUnavailable=true"); exit(1) }
+        }
+        if CommandLine.arguments.contains("--deepseek-keychain-api-models") {
+            do {
+                guard let key = try DeepSeekCredentialStore().loadNonInteractively() else { exit(2) }
+                let models = try await DeepSeekClient().fetchAvailableModels(apiKey: key)
+                print("deepseekKeychainAPIValid=\(Set(models).isSuperset(of: Set(DeepSeekModel.allCases.map(\.rawValue))))")
+                exit(0)
+            } catch { print("deepseekKeychainAPIValid=false"); exit(1) }
+        }
+        if CommandLine.arguments.contains("--credential-access-status") {
+            let store = DeepSeekCredentialStore()
+            let exists = store.hasKey()
+            do { print("deepseekExists=\(exists) deepseekReadable=\(try store.loadNonInteractively() != nil)") }
+            catch { print("deepseekExists=\(exists) deepseekReadable=false") }
+            do { _ = try DingTalkWebhookStore().load(); print("dingtalkReadable=true") }
+            catch { print("dingtalkReadable=false") }
+            exit(0)
+        }
+        if CommandLine.arguments.contains("--quota-recovery-health") {
+            do {
+                let status = try QuotaRecoveryServiceStatus.read()
+                let store = try QuotaRecoveryStore()
+                let data = try JSONSerialization.data(withJSONObject: [
+                    "phase": status.phase, "notice": status.notice,
+                    "heartbeatAgeSeconds": max(0, Date().timeIntervalSince(status.heartbeatAt)),
+                    "nextExecution": status.executeAt.map { ISO8601DateFormatter().string(from: $0) } ?? "none",
+                    "lastTrigger": status.lastTriggeredAt.map { ISO8601DateFormatter().string(from: $0) } ?? "none",
+                    "lastDelaySeconds": status.lastDelaySeconds ?? -1,
+                    "cycleOutcomes": store.cycles.compactMap(\.outcome)
+                ], options: [.prettyPrinted, .sortedKeys])
+                print(String(data: data, encoding: .utf8)!)
+                exit(Date().timeIntervalSince(status.heartbeatAt) > 90 ? 1 : 0)
+            } catch { print("recoveryHealthUnavailable=true"); exit(1) }
+        }
+        if let threadArgument = CommandLine.arguments.first(where: { $0.hasPrefix("--recovery-receipt-thread=") }),
+           let messageArgument = CommandLine.arguments.first(where: { $0.hasPrefix("--message-id=") }) {
+            do {
+                let receipt = try await AppServerControlClient().recoveryReceipt(
+                    threadID: String(threadArgument.dropFirst("--recovery-receipt-thread=".count)),
+                    messageID: String(messageArgument.dropFirst("--message-id=".count)))
+                print("greetingReceipt=\(receipt != nil)")
+                exit(receipt == nil ? 1 : 0)
+            } catch { print("receiptError=\(error.localizedDescription)"); exit(1) }
+        }
+        if CommandLine.arguments.contains("--quota-recovery-preview") {
+            do {
+                let client = AppServerControlClient(timeout: 8)
+                let key = try await client.recoveryAccountKey()
+                let quota = try await client.readRateLimits()
+                let failures = try await client.recoveryFailures(since: Date().addingTimeInterval(-18_000), quotaExhausted: quota.windows.contains { $0.usedPercent == 100 })
+                let store = try QuotaRecoveryStore()
+                print("planAccount=true windows=\(quota.windows.count) shortWindow=\(quota.windows.contains { $0.durationMinutes == 300 }) quotaFailures=\(failures.count) next=\(store.next(accountKey: key)?.executeAt.description ?? "none")")
+                exit(0)
+            } catch { print("recoveryPreviewError=\(error.localizedDescription)"); exit(1) }
+        }
+        if CommandLine.arguments.contains("--test-recovery-greeting") {
+            do {
+                let client = AppServerControlClient(timeout: 12)
+                _ = try await client.recoveryAccountKey()
+                let cwd = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/CodexBar/QuotaRecovery")
+                try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+                let id = try await client.createRecoveryThread(cwd: cwd.path)
+                let job = QuotaRecoveryJob(threadID: id)
+                let turnID = try await client.sendRecovery(job: job)
+                let confirmed = try await client.recoveryReceipt(threadID: id, messageID: job.id) != nil
+                print("threadID=\(id) turnID=\(turnID) greetingReceipt=\(confirmed)")
+                exit(confirmed ? 0 : 1)
+            } catch { print("greetingError=\(error.localizedDescription)"); exit(1) }
+        }
+        if CommandLine.arguments.contains("--sample-network-speed") {
+            let monitor = NetworkSpeedMonitor()
+            _ = monitor.sample()
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            let speed = monitor.sample()
+            print("upload=\(NetworkSpeed.compact(speed.uploadBytesPerSecond)) download=\(NetworkSpeed.compact(speed.downloadBytesPerSecond))")
+            exit(0)
+        }
+        if CommandLine.arguments.contains("--quota-shared-only") {
+            do {
+                let value = try await AppServerControlClient(timeout: 8).readRateLimits()
+                print("shared_quota_windows=\(value.windows.count)")
+                exit(value.windows.isEmpty ? 1 : 0)
+            } catch {
+                print("shared_quota_error=\(error.localizedDescription)")
+                exit(1)
+            }
+        }
+        if CommandLine.arguments.contains("--quota-cache-state") {
+            do {
+                let snapshot = try QuotaResetNoticeStore().lastSnapshot
+                print("cached_windows=\(snapshot?.windows.count ?? 0) cached_at=\(snapshot?.observedAt.description ?? "none")")
+                exit(0)
+            } catch {
+                print("quota_cache_error=\(error.localizedDescription)")
+                exit(1)
+            }
+        }
+        if CommandLine.arguments.contains("--test-dingtalk-reset-notification") {
+            do {
+                try await DingTalkResetNotifier().send(event: nil, keyword: "请注意")
+                print("DingTalk reset test delivered (errcode=0)")
+                exit(0)
+            } catch {
+                print("DingTalk reset test failed: \(error.localizedDescription)")
+                exit(1)
+            }
+        }
         if let modelArgument = CommandLine.arguments.first(where: { $0.hasPrefix("--thread-launch-model=") }),
            let providerArgument = CommandLine.arguments.first(where: { $0.hasPrefix("--thread-launch-provider=") }) {
             let model = String(modelArgument.dropFirst("--thread-launch-model=".count))

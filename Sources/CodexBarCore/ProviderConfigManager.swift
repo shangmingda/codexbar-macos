@@ -95,7 +95,8 @@ public final class ProviderConfigManager: @unchecked Sendable {
         }
         guard let originalText = String(data: originalData, encoding: .utf8) else { throw ProviderConfigError.invalidUTF8 }
         try Self.validateCatalog(catalogData)
-        try catalogData.write(to: catalogURL, options: .atomic)
+        let catalog = try Self.normalizingCatalog(catalogData)
+        try catalog.write(to: catalogURL, options: .atomic)
         try secureFile(catalogURL)
 
         let patchedText = Self.makeDeepSeekConfig(
@@ -343,6 +344,62 @@ public final class ProviderConfigManager: @unchecked Sendable {
               Set(models.compactMap { $0["slug"] as? String }).isSuperset(of: Set(DeepSeekModel.allCases.map(\.rawValue))) else {
             throw DeepSeekClientError.invalidCatalog
         }
+    }
+
+    /// Serialises tool calls for the DeepSeek catalogue.
+    ///
+    /// The official catalogue still advertises `supports_parallel_tool_calls`,
+    /// but the DeepSeek Responses endpoint cannot pair the outputs of tool calls
+    /// issued in one response as soon as any other item sits between those
+    /// outputs. Recorded sessions show this exactly: 241 parallel batches whose
+    /// outputs are contiguous all succeeded, while all three batches that had an
+    /// `<image_resize_notice>` between two outputs failed with
+    /// `No tool output found for tool call …` and then replayed that broken pair
+    /// on every later turn. Codex only emits that notice when an image result is
+    /// resized, so the flag alone does not stop the model from asking for two
+    /// images at once. This normaliser therefore both clears the flag and adds a
+    /// serial tool-call rule to the model instructions, without touching any
+    /// OpenAI configuration.
+    public static func normalizingCatalog(_ data: Data) throws -> Data {
+        guard var object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var models = object["models"] as? [[String: Any]], !models.isEmpty else {
+            throw DeepSeekClientError.invalidCatalog
+        }
+        for index in models.indices {
+            models[index]["supports_parallel_tool_calls"] = false
+            if let base = models[index]["base_instructions"] as? String, !base.isEmpty {
+                models[index]["base_instructions"] = serialToolCallInstructions(appendingTo: base)
+            }
+            // The prompt the client actually sends lives in
+            // `model_messages.instructions_template`; a rule that only touches
+            // `base_instructions` never reaches the model.
+            if var messages = models[index]["model_messages"] as? [String: Any],
+               let template = messages["instructions_template"] as? String,
+               !template.isEmpty {
+                messages["instructions_template"] = serialToolCallInstructions(appendingTo: template)
+                models[index]["model_messages"] = messages
+            }
+        }
+        object["models"] = models
+        guard let normalized = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else {
+            throw DeepSeekClientError.invalidCatalog
+        }
+        return normalized
+    }
+
+    static let serialToolCallInstructionMarker = "## CodexBar tool-call rule"
+
+    static let serialToolCallInstruction = """
+
+
+    ## CodexBar tool-call rule (DeepSeek endpoint compatibility)
+    This provider cannot pair the outputs of several tool calls issued in one assistant turn once any notice sits between those outputs; the unmatched call then fails with `No tool output found for tool call …` and the whole conversation becomes unusable, because the broken pair is replayed on every later turn. Therefore issue at most one tool call per assistant turn: send a single call, wait for its result, and only then decide the next step. When you need to inspect several files or images, handle them strictly one after another instead of in parallel.
+    Screenshots: before calling view_image on a screenshot, shrink a copy so its longest side is at most 2048 pixels — `sips --resampleHeightWidthMax 2048 <source> --out /tmp/codexbar-view-<name>.png` — and view that shrunk copy. Images already within 2048 pixels are passed through untouched, while larger ones make the client insert an `<image_resize_notice>` between tool outputs, which is exactly what breaks tool-output pairing here.
+    """
+
+    static func serialToolCallInstructions(appendingTo base: String) -> String {
+        guard !base.contains(serialToolCallInstructionMarker) else { return base }
+        return base + serialToolCallInstruction
     }
 
     private static func sha256(_ data: Data) -> String {

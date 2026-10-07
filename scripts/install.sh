@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="${0:A:h:h}"
 "$ROOT/scripts/build-app.sh" >/dev/null
+"$ROOT/scripts/install-credential-helper.sh"
 
 APP_SOURCE="$ROOT/dist/CodexBar.app"
 APP_TARGET="$HOME/Applications/CodexBar.app"
@@ -17,7 +18,10 @@ if [[ -z "$CODEX_APP" ]]; then
     if [[ -d "$candidate" ]]; then CODEX_APP="$candidate"; break; fi
   done
 fi
-CODEX_BIN="$CODEX_APP/Contents/Resources/codex"
+CODEX_BIN="$CODEX_APP/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
+if [[ ! -x "$CODEX_BIN" ]]; then
+  CODEX_BIN="$CODEX_APP/Contents/Resources/codex"
+fi
 if [[ -z "$CODEX_APP" || ! -x "$CODEX_BIN" ]]; then
   echo "未找到 Codex Desktop，请先安装后再运行安装脚本" >&2
   exit 1
@@ -30,7 +34,7 @@ codex_desktop_running() {
 mkdir -p "$HOME/Applications" "$HOME/Library/LaunchAgents" "$SUPPORT"
 
 PROVIDER_ROLLBACK=0
-if [[ -x "$WATCHER" ]] && /usr/bin/grep -a -q -- '--restore-only' "$WATCHER"; then
+if ! codex_desktop_running && [[ -x "$WATCHER" ]] && /usr/bin/grep -a -q -- '--restore-only' "$WATCHER"; then
   set +e
   "$WATCHER" --restore-only
   ROLLBACK_STATUS=$?
@@ -45,6 +49,8 @@ fi
 
 CONTROL_RESTART=1
 if launchctl print "gui/$(id -u)/com.smd.codexbar.appserver" >/dev/null 2>&1 && \
+   [[ -S "$HOME/.codex/app-server-control/app-server-control.sock" ]] && \
+   [[ "$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$CONTROL_AGENT" 2>/dev/null)" == "$CODEX_BIN" ]] && \
    codex_desktop_running; then
   CONTROL_RESTART=0
 fi

@@ -1,8 +1,16 @@
 import AppKit
+import CodexBarCore
 
 final class StatusItemContentView: NSView {
     var lines: [String] = ["额度 --"] { didSet { needsDisplay = true } }
     var icon: NSImage? { didSet { needsDisplay = true } }
+    var speed: NetworkSpeed = .zero { didSet { needsDisplay = true } }
+
+    // A constant width prevents the whole menu bar from shifting whenever a
+    // rate changes from B/s to K/s or M/s.
+    var preferredWidth: CGFloat { 284 }
+    private let speedCellWidth: CGFloat = 55
+    private var speedWidth: CGFloat { speedCellWidth * 2 + 4 }
 
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
@@ -15,15 +23,28 @@ final class StatusItemContentView: NSView {
         let font = NSFont.monospacedDigitSystemFont(ofSize: twoLines ? 8.5 : 11, weight: .medium)
         let color = NSColor.labelColor
         let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .left
-        paragraph.minimumLineHeight = twoLines ? 9.5 : 13
-        paragraph.maximumLineHeight = twoLines ? 9.5 : 13
-        let text = lines.joined(separator: "\n")
+        paragraph.lineBreakMode = .byTruncatingTail
         let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color, .paragraphStyle: paragraph]
-        let attributed = NSAttributedString(string: text, attributes: attrs)
-        let measuredHeight = ceil(attributed.boundingRect(with: NSSize(width: bounds.width - 25, height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin]).height)
-        let y = floor((bounds.height - measuredHeight) / 2)
-        let rect = NSRect(x: 23, y: y, width: bounds.width - 25, height: measuredHeight)
-        attributed.draw(in: rect)
+        let textWidth = max(0, bounds.width - 31 - speedWidth)
+        let rowHeight: CGFloat = twoLines ? 10 : 14
+        let top = floor((bounds.height - rowHeight * CGFloat(lines.count)) / 2)
+        for (index, line) in lines.enumerated() {
+            (line as NSString).draw(in: NSRect(x: 23, y: top + rowHeight * CGFloat(lines.count - index - 1), width: textWidth, height: rowHeight), withAttributes: attrs)
+        }
+
+        let speedFont = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .medium)
+        let speedParagraph = NSMutableParagraphStyle()
+        speedParagraph.alignment = .right
+        let speedY = floor((bounds.height - 11) / 2)
+        var x = bounds.width - speedWidth
+        for (symbol, value) in [("↑", speed.uploadBytesPerSecond), ("↓", speed.downloadBytesPerSecond)] {
+            let symbolText = NSAttributedString(string: symbol, attributes: [.font: speedFont, .foregroundColor: NSColor.secondaryLabelColor])
+            symbolText.draw(at: NSPoint(x: x, y: speedY))
+            (NetworkSpeed.compact(value) as NSString).draw(
+                in: NSRect(x: x + 10, y: speedY, width: speedCellWidth - 11, height: 12),
+                withAttributes: [.font: speedFont, .foregroundColor: NSColor.labelColor, .paragraphStyle: speedParagraph]
+            )
+            x += speedCellWidth
+        }
     }
 }

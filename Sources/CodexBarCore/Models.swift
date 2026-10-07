@@ -144,6 +144,36 @@ public struct RateLimitData: Equatable, Sendable {
     }
 }
 
+/// Codex keeps a thread's `model_provider` when the model alone is changed in
+/// the native picker, so a thread can end up holding a DeepSeek catalogue model
+/// while still routed to OpenAI (or the reverse). The turn is then sent to the
+/// wrong endpoint and fails before any model sees it.
+public enum ProviderBindingIssue: Equatable, Sendable {
+    case deepSeekModelOnOpenAIProvider(model: String)
+    case openAIModelOnDeepSeekProvider(model: String)
+
+    public var detail: String {
+        switch self {
+        case let .deepSeekModelOnOpenAIProvider(model):
+            return "这条对话的模型是「\(model)」却仍绑定 OpenAI Provider。Codex 会把请求发到 api.openai.com，因缺少可用凭据返回 401，而且每次发送都会失败。"
+        case let .openAIModelOnDeepSeekProvider(model):
+            return "这条对话的模型是「\(model)」却绑定 DeepSeek Provider。请求会发到 api.deepseek.com，该模型不存在，同样无法发送。"
+        }
+    }
+
+    public var repairActionTitle: String {
+        switch self {
+        case .deepSeekModelOnOpenAIProvider: return "修复为 DeepSeek Provider"
+        case .openAIModelOnDeepSeekProvider: return "改用当前 DeepSeek 模型"
+        }
+    }
+
+    public var isDeepSeekModelOnOpenAIProvider: Bool {
+        if case .deepSeekModelOnOpenAIProvider = self { return true }
+        return false
+    }
+}
+
 public struct ActiveTask: Identifiable, Equatable, Sendable, Codable {
     public let id: String
     public let title: String
@@ -261,6 +291,21 @@ public struct ActiveTask: Identifiable, Equatable, Sendable, Codable {
         }
         let label = prefix + components.joined(separator: " ")
         return label.count <= 18 ? label : String(label.prefix(17)) + "…"
+    }
+
+    /// Non-nil when the thread's model and provider belong to different
+    /// families, which makes every turn fail before reaching a model.
+    public var providerBindingIssue: ProviderBindingIssue? {
+        guard let rawModel = model?.trimmingCharacters(in: .whitespacesAndNewlines), !rawModel.isEmpty else { return nil }
+        let isDeepSeekModel = DeepSeekModel.compatible(rawValue: rawModel) != nil
+        switch providerMode {
+        case .deepSeek:
+            return isDeepSeekModel ? nil : .openAIModelOnDeepSeekProvider(model: rawModel)
+        case .openAI:
+            return isDeepSeekModel ? .deepSeekModelOnOpenAIProvider(model: rawModel) : nil
+        case nil:
+            return nil
+        }
     }
 }
 

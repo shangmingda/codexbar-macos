@@ -6,6 +6,14 @@ import SwiftUI
 @main
 enum CodexBarMain {
     static func main() {
+        if CommandLine.arguments.contains("--credential-access-status") {
+            do {
+                print("deepseekReadable=\(try DeepSeekCredentialStore().loadNonInteractively() != nil)")
+                _ = try DingTalkWebhookStore().load()
+                print("dingtalkReadable=true")
+                exit(0)
+            } catch { print("credentialAccessFailed=true"); exit(1) }
+        }
         if CommandLine.arguments.contains("--delete-deepseek-credential") {
             do { try DeepSeekCredentialStore().delete(); exit(0) }
             catch { exit(1) }
@@ -22,7 +30,7 @@ struct CodexBarApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let state = AppState(
-        previewMode: ProcessInfo.processInfo.arguments.contains("--preview")
+        previewMode: ProcessInfo.processInfo.arguments.contains("--preview") || ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--render-previews=") })
     )
     private let statusItem = NSStatusBar.system.statusItem(withLength: 150)
     private let popover = NSPopover()
@@ -35,11 +43,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var previewController: NSViewController?
     private var statusUpdateScheduled = false
     private var terminationInFlight = false
-    private var previewMode: Bool { ProcessInfo.processInfo.arguments.contains("--preview") }
+    private var previewMode: Bool { ProcessInfo.processInfo.arguments.contains("--preview") || ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--render-previews=") }) }
     private var deepSeekPreviewMode: Bool { ProcessInfo.processInfo.arguments.contains("--preview-deepseek") }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if previewMode {
+            if let renderArgument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--render-previews=") }) {
+                renderPreviews(at: String(renderArgument.dropFirst("--render-previews=".count)))
+                return
+            }
             if deepSeekPreviewMode { state.applyDeepSeekPreviewState() }
             NSApp.setActivationPolicy(.regular)
             showPreviewWindow()
@@ -55,6 +67,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
+    /// Deterministic visual QA without Keychain, provider changes, automation
+    /// permissions, or the user's running app. These are real SwiftUI views.
+    private func renderPreviews(at path: String) {
+        let root = URL(fileURLWithPath: path, isDirectory: true)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let dashboard = NSHostingView(rootView: DashboardView(state: state))
+        let support = NSHostingView(rootView: AuthorSupportView())
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 750, height: 600),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 750, height: 600))
+        content.addSubview(dashboard); content.addSubview(support)
+        dashboard.frame = NSRect(x: 0, y: 0, width: 370, height: 560)
+        support.frame = NSRect(x: 390, y: 0, width: 330, height: 500)
+        window.contentView = content
+        window.orderFront(nil)
+        previewWindow = window
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            for (name, view) in [("dashboard", dashboard as NSView), ("support", support as NSView)] {
+                view.layoutSubtreeIfNeeded()
+                guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { continue }
+                view.cacheDisplay(in: view.bounds, to: bitmap)
+                if let data = bitmap.representation(using: .png, properties: [:]) {
+                    try? data.write(to: root.appendingPathComponent(name + ".png"))
+                }
+            }
+            window.close()
+            NSApp.terminate(nil)
+        }
+    }
+
     private func showPreviewWindow() {
         let controller = NSHostingController(rootView: DashboardView(state: state))
         controller.sizingOptions = []
@@ -67,6 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         statusBackdrop.layer?.cornerRadius = 8
         let statusPreview = StatusItemContentView()
         statusPreview.lines = state.statusLines
+        statusPreview.speed = state.networkSpeed
         statusPreview.icon = CodexBarBrand.image(size: 17)
         statusBackdrop.addSubview(statusPreview)
         root.addSubview(statusBackdrop)
@@ -77,7 +120,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         NSLayoutConstraint.activate([
             statusBackdrop.topAnchor.constraint(equalTo: root.topAnchor, constant: 10),
             statusBackdrop.centerXAnchor.constraint(equalTo: root.centerXAnchor),
-            statusBackdrop.widthAnchor.constraint(equalToConstant: 190),
+            statusBackdrop.widthAnchor.constraint(equalToConstant: 285),
             statusBackdrop.heightAnchor.constraint(equalToConstant: 24),
             statusPreview.leadingAnchor.constraint(equalTo: statusBackdrop.leadingAnchor),
             statusPreview.trailingAnchor.constraint(equalTo: statusBackdrop.trailingAnchor),
@@ -155,10 +198,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let lines = state.statusLines
         if contentView.lines != lines { contentView.lines = lines }
         if previewStatusView?.lines != lines { previewStatusView?.lines = lines }
-        let maxCharacters = lines.map(\.count).max() ?? 8
-        let desiredLength = max(92, min(205, 31 + CGFloat(maxCharacters) * (lines.count > 1 ? 7 : 7.4)))
+        if contentView.speed != state.networkSpeed { contentView.speed = state.networkSpeed }
+        if previewStatusView?.speed != state.networkSpeed { previewStatusView?.speed = state.networkSpeed }
+        let desiredLength = contentView.preferredWidth
         if abs(statusItem.length - desiredLength) > 0.5 { statusItem.length = desiredLength }
-        statusItem.button?.setAccessibilityLabel("Codex，\(lines.joined(separator: "，"))，进行中任务 \(state.tasks.count) 项")
+        if let button = statusItem.button,
+           abs(contentView.frame.width - desiredLength) > 0.5 {
+            contentView.frame = NSRect(x: 0, y: 0, width: desiredLength, height: button.bounds.height)
+            contentView.needsDisplay = true
+        }
+        statusItem.button?.setAccessibilityLabel("Codex，\(lines.joined(separator: "，"))，上传 \(NetworkSpeed.compact(state.networkSpeed.uploadBytesPerSecond))，下载 \(NetworkSpeed.compact(state.networkSpeed.downloadBytesPerSecond))，进行中任务 \(state.tasks.count) 项")
     }
 
     @objc private func togglePopover() {
@@ -167,6 +216,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             popover.performClose(nil)
         } else {
             state.refreshTasks()
+            state.refreshQuota(force: true)
             preparePopoverContent()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
@@ -179,6 +229,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !previewMode else { return .terminateNow }
         guard state.needsProviderRollbackOnExit else { return .terminateNow }
         guard !terminationInFlight else { return .terminateLater }
         terminationInFlight = true

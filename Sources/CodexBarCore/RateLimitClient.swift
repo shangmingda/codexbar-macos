@@ -28,6 +28,16 @@ public final class RateLimitClient {
     }
 
     public func fetch() async throws -> RateLimitData {
+        // The installed companion keeps a shared app-server alive. Reading it
+        // avoids spawning another process and survives slow CLI startup.
+        if let shared = try? await AppServerControlClient(timeout: 8).readRateLimits(),
+           !shared.windows.isEmpty {
+            return shared
+        }
+        return try await fetchFromStandaloneServer()
+    }
+
+    private func fetchFromStandaloneServer() async throws -> RateLimitData {
         guard let executableURL else { throw RateLimitClientError.codexNotFound }
         return try await withCheckedThrowingContinuation { continuation in
             let session = RateLimitRequestSession(continuation: continuation)

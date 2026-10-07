@@ -6,15 +6,25 @@ import OSLog
 @MainActor
 final class AppState: ObservableObject {
     @Published private(set) var quotas: [QuotaWindow] = []
+    @Published private(set) var quotaSnapshotStale = false
+    @Published private(set) var networkSpeed: NetworkSpeed = .zero
     @Published private(set) var resetCredits: [ResetCredit] = []
     @Published private(set) var resetCreditAvailableCount = 0
     @Published private(set) var autoUseResetCreditsEnabled = false
     @Published private(set) var resetCreditNotice: String?
+    @Published private(set) var quotaRecoveryEnabled = false
+    @Published private(set) var quotaRecoveryAt: Date?
+    @Published private(set) var quotaRecoveryPendingTasks = 0
+    @Published private(set) var quotaRecoveryNotice = "等待额度同步"
+    @Published private(set) var quotaRecoveryNeedsAttention = false
     @Published private(set) var tasks: [ActiveTask] = []
     @Published private(set) var budgets: [String: TaskBudget] = [:]
     @Published private(set) var budgetNotice: String?
     @Published private(set) var isRefreshing = false
     @Published private(set) var quotaError: String?
+    @Published private(set) var dingTalkConfigured = false
+    @Published private(set) var dingTalkKeyword = "请注意"
+    @Published private(set) var dingTalkNotice: String?
     @Published private(set) var taskError: String?
     @Published private(set) var lastUpdated: Date?
     @Published private(set) var autoStopActivationPending = false
@@ -24,27 +34,45 @@ final class AppState: ObservableObject {
     @Published private(set) var deepSeekKeyConfigured = false
     @Published private(set) var deepSeekError: String?
     @Published private(set) var providerNotice: String?
+    @Published private(set) var providerRepairNotice: String?
+    @Published private(set) var providerBindingCandidates: [ProviderBindingCandidate] = []
+    @Published private(set) var toolPairingNotice: String?
+    @Published private(set) var toolPairingCandidates: [BrokenToolPairingCandidate] = []
     @Published private(set) var isProviderSwitching = false
     @Published private(set) var isSavingDeepSeekKey = false
 
     private let rateClient = RateLimitClient()
+    private let networkMonitor = NetworkSpeedMonitor()
+    private let dingTalkWebhookStore = DingTalkWebhookStore()
+    private let dingTalkNotifier = DingTalkResetNotifier()
+    private var quotaResetNoticeStore: QuotaResetNoticeStore?
     private let taskStore = TaskStore()
     private let budgetStore = TaskBudgetStore()
     private let resetCreditAutoUseStore = ResetCreditAutoUseStore()
     private let controlClient = AppServerControlClient()
+    private let quotaRecoveryKey = "CodexBarQuotaRecoveryEnabled"
     private let deepSeekClient = DeepSeekClient()
     private let credentialStore = DeepSeekCredentialStore()
     private let providerManager = ProviderConfigManager()
     private let providerVerifier = ProviderConfigVerifier()
+    private let threadRepairStore = ThreadProviderRepairStore()
     private let codexProcessController = CodexProcessController()
     private let codexThreadLauncher = CodexThreadLauncher()
     private var timer: Timer?
+    private var speedTimer: Timer?
     private var providerLeaseTimer: Timer?
+    private var toolPairingScanStarted = false
+    private var toolPairingRepairInFlight: Set<String> = []
     private var tick = 0
     private var taskRefreshInFlight = false
     private var quotaRefreshInFlight = false
+    private var quotaRefreshFailures = 0
+    private var nextQuotaRefreshAt: Date?
+    private var resetNotificationInFlight = false
+    private var creditDetailsIncomplete = false
     private var deepSeekRefreshInFlight = false
     private var providerCompatibilityInFlight = false
+    private var providerRepairInFlight = Set<String>()
     private var budgetRefreshInFlight = false
     private var warningInFlight = Set<String>()
     private var lastWarningAttempt: [String: Date] = [:]
@@ -55,17 +83,20 @@ final class AppState: ObservableObject {
     private var deepSeekSessionAPIKey: String?
     private let activationPendingKey = "CodexBarAutoStopActivationPending"
     private let autoUseResetCreditsKey = "CodexBarAutoUseResetCreditsEnabled"
+    private let dingTalkKeywordKey = "CodexBarDingTalkResetKeyword"
     private let logger = Logger(subsystem: "com.smd.codexbar", category: "refresh")
     private var needsStartupCodexRecovery = false
 
     var statusLines: [String] {
         if providerStatus.mode == .deepSeek {
             let balance = deepSeekBalance?.balances.first?.formattedTotal ?? "余额 --"
-            var first = "DS 原生选模 · \(balance)"
+            var first = "DS · \(balance)"
             if !tasks.isEmpty { first = "\(tasks.count)项 · " + first }
             return [first]
         }
-        return StatusTitleFormatter.lines(windows: quotas, taskCount: tasks.count)
+        var lines = StatusTitleFormatter.lines(windows: quotas, taskCount: tasks.count)
+        if quotaSnapshotStale, !quotas.isEmpty { lines[0] += " · 缓存" }
+        return lines
     }
     var canActivateAutoStopNow: Bool { autoStopActivationPending && !controlRestartInFlight }
     var activeProviderMode: ModelProviderMode { providerStatus.mode }
@@ -101,7 +132,15 @@ final class AppState: ObservableObject {
     init(previewMode: Bool = false) {
         // UI previews must never touch the real Keychain or provider transaction.
         // The caller applies deterministic sample state immediately after init.
-        if previewMode { return }
+        if previewMode {
+            quotaRecoveryEnabled = true
+            quotaRecoveryAt = Date().addingTimeInterval(3_600)
+            quotaRecoveryNotice = "重置后 3 分钟发送“你好”"
+            return
+        }
+
+        quotaRecoveryEnabled = UserDefaults.standard.bool(forKey: quotaRecoveryKey)
+        refreshQuotaRecoveryStatus()
 
         deepSeekKeyConfigured = credentialStore.hasKey()
         if providerManager.hasActiveTransaction() {
@@ -122,6 +161,20 @@ final class AppState: ObservableObject {
             budgetNotice = "已取消旧版自动重启计划；CodexBar 不会自行关闭 Codex"
         }
         autoUseResetCreditsEnabled = UserDefaults.standard.bool(forKey: autoUseResetCreditsKey)
+        dingTalkKeyword = UserDefaults.standard.string(forKey: dingTalkKeywordKey) ?? "请注意"
+        dingTalkConfigured = dingTalkWebhookStore.isConfigured()
+        do {
+            let store = try QuotaResetNoticeStore()
+            quotaResetNoticeStore = store
+            if let snapshot = store.lastSnapshot,
+               Date().timeIntervalSince(snapshot.observedAt) >= 0,
+               Date().timeIntervalSince(snapshot.observedAt) <= 1_800 {
+                quotas = snapshot.windows
+                quotaSnapshotStale = true
+                quotaError = "显示最近成功同步的额度，正在更新"
+            }
+        }
+        catch { dingTalkNotice = "额度提醒记录无法读取：\(error.localizedDescription)" }
         do {
             budgets = try budgetStore.load()
         } catch {
@@ -136,6 +189,7 @@ final class AppState: ObservableObject {
 
     func start() {
         refreshAll()
+        sendPendingResetNotifications()
         prepareProviderCompatibilityIfPossible()
         if DeepSeekBackgroundRefreshPolicy.shouldRefresh(
             hasKey: deepSeekKeyConfigured,
@@ -146,16 +200,27 @@ final class AppState: ObservableObject {
             providerNotice = "已安全恢复 OpenAI 配置；未重启 Codex，也未中断正在运行的任务"
         }
         timer?.invalidate()
+        speedTimer?.invalidate()
+        networkSpeed = networkMonitor.sample()
+        speedTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.networkSpeed = self.networkMonitor.sample()
+            }
+        }
+        RunLoop.main.add(speedTimer!, forMode: .common)
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 self.tick += 1
+                self.refreshQuotaRecoveryStatus()
                 if self.tick % 5 == 0 {
                     self.refreshTasks()
                 } else if !self.budgets.isEmpty {
                     self.refreshBudgetUsage()
                 }
                 if self.tick % 20 == 0 { self.refreshQuota() }
+                if self.tick % 20 == 0 { self.sendPendingResetNotifications() }
                 if self.tick % 20 == 0, self.deepSeekSessionAPIKey != nil {
                     self.refreshDeepSeekBalance()
                 }
@@ -166,7 +231,7 @@ final class AppState: ObservableObject {
 
     func refreshAll() {
         refreshTasks()
-        refreshQuota()
+        refreshQuota(force: true)
         if DeepSeekBackgroundRefreshPolicy.shouldRefresh(
             hasKey: deepSeekKeyConfigured,
             activeProvider: providerStatus.mode
@@ -196,6 +261,8 @@ final class AppState: ObservableObject {
                     taskError = nil
                     lastUpdated = Date()
                     updateAutoStopActivationState()
+                    await refreshProviderBindingCandidates()
+                    await refreshToolPairingCandidatesIfNeeded()
                     evaluateBudgets()
                     return
                 } catch {
@@ -214,8 +281,9 @@ final class AppState: ObservableObject {
         }
     }
 
-    func refreshQuota() {
+    func refreshQuota(force: Bool = false) {
         guard !quotaRefreshInFlight else { return }
+        if !force, let nextQuotaRefreshAt, Date() < nextQuotaRefreshAt { return }
         quotaRefreshInFlight = true
         updateRefreshingState()
         Task {
@@ -224,38 +292,127 @@ final class AppState: ObservableObject {
                 updateRefreshingState()
             }
             var finalError: Error?
-            for attempt in 1...3 {
+            for attempt in 1...2 {
                 do {
                     let value = try await rateClient.fetch()
-                    if !value.windows.isEmpty { quotas = value.windows }
+                    guard !value.windows.isEmpty else { throw RateLimitClientError.malformedResponse }
+                    quotas = value.windows
+                    quotaSnapshotStale = false
+                    observeQuotaReset(value.windows)
                     resetCreditAvailableCount = value.resetCreditAvailableCount
                     if !value.resetCreditDetailsComplete {
-                        logger.warning("Reset credit details incomplete: expected \(value.resetCreditAvailableCount), received \(value.resetCredits.count)")
-                        if attempt < 3 {
-                            let delay = attempt == 1 ? 800_000_000 : 1_800_000_000
-                            try? await Task.sleep(nanoseconds: UInt64(delay))
-                            continue
+                        if !creditDetailsIncomplete {
+                            logger.warning("Reset credit details incomplete: expected \(value.resetCreditAvailableCount), received \(value.resetCredits.count)")
                         }
-                        quotaError = "重置卡明细暂未返回，正在自动重试"
-                        return
+                        creditDetailsIncomplete = true
+                        resetCreditNotice = "重置卡明细暂未返回；额度已更新，将在下次刷新时再检查"
+                    } else {
+                        creditDetailsIncomplete = false
+                        resetCredits = value.resetCredits
+                        evaluateResetCreditAutoUse()
                     }
-                    resetCredits = value.resetCredits
                     quotaError = nil
+                    quotaRefreshFailures = 0
+                    nextQuotaRefreshAt = nil
                     lastUpdated = Date()
-                    evaluateResetCreditAutoUse()
                     return
                 } catch {
                     finalError = error
-                    logger.warning("Quota refresh attempt \(attempt) failed: \(error.localizedDescription, privacy: .public)")
-                    if attempt < 3 {
-                        let delay = attempt == 1 ? 800_000_000 : 1_800_000_000
-                        try? await Task.sleep(nanoseconds: UInt64(delay))
+                    if attempt < 2 {
+                        try? await Task.sleep(nanoseconds: 800_000_000)
                     }
                 }
             }
-            quotaError = "额度同步暂时失败，正在自动重试"
+            quotaRefreshFailures += 1
+            let delay = min(120, 30 * (1 << min(quotaRefreshFailures - 1, 2)))
+            nextQuotaRefreshAt = Date().addingTimeInterval(TimeInterval(delay))
+            quotaError = "额度同步暂时失败，将在 \(delay) 秒后重试"
             if let finalError {
-                logger.error("Quota refresh exhausted retries: \(finalError.localizedDescription, privacy: .public)")
+                logger.error("Quota refresh failed; retry in \(delay)s: \(finalError.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    func setQuotaRecoveryEnabled(_ enabled: Bool) {
+        quotaRecoveryEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: quotaRecoveryKey)
+        if enabled { refreshQuota(force: true) }
+        else { quotaRecoveryNotice = "自动续聊已关闭" }
+    }
+
+    private func refreshQuotaRecoveryStatus() {
+        guard quotaRecoveryEnabled else { return }
+        guard let status = try? QuotaRecoveryServiceStatus.read() else {
+            quotaRecoveryNotice = "等待后台自动续聊服务启动"; quotaRecoveryNeedsAttention = true; return
+        }
+        quotaRecoveryAt = status.executeAt
+        quotaRecoveryPendingTasks = status.pendingTasks
+        quotaRecoveryNotice = Date().timeIntervalSince(status.heartbeatAt) > 90 ? "后台服务未响应，请重新打开 CodexBar" : status.notice
+        quotaRecoveryNeedsAttention = Date().timeIntervalSince(status.heartbeatAt) > 90 || ["prepareFailed", "executionFailed"].contains(status.phase)
+    }
+
+    @discardableResult
+    func saveDingTalkConfiguration(webhook: String, keyword: String) -> Bool {
+        let cleanKeyword = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanKeyword.isEmpty else { dingTalkNotice = "通知关键字不能为空"; return false }
+        do {
+            if !webhook.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                try dingTalkWebhookStore.save(webhook)
+            }
+            guard dingTalkWebhookStore.isConfigured() else { throw DingTalkResetError.missingWebhook }
+            UserDefaults.standard.set(cleanKeyword, forKey: dingTalkKeywordKey)
+            dingTalkKeyword = cleanKeyword
+            dingTalkConfigured = true
+            dingTalkNotice = "配置已保存到本机钥匙串"
+            sendPendingResetNotifications()
+            return true
+        } catch {
+            dingTalkNotice = error.localizedDescription
+            return false
+        }
+    }
+
+    func testDingTalkConfiguration() {
+        guard dingTalkConfigured else { dingTalkNotice = "请先保存 Webhook"; return }
+        Task {
+            do {
+                try await dingTalkNotifier.send(event: nil, keyword: dingTalkKeyword)
+                dingTalkNotice = "测试通知已送达（钉钉 errcode=0）"
+            } catch { dingTalkNotice = "测试失败：\(error.localizedDescription)" }
+        }
+    }
+
+    private func observeQuotaReset(_ windows: [QuotaWindow]) {
+        guard let quotaResetNoticeStore else { return }
+        do {
+            _ = try quotaResetNoticeStore.observe(windows)
+            sendPendingResetNotifications()
+        } catch {
+            dingTalkNotice = "额度提醒记录保存失败，已暂停发送"
+            logger.error("Quota reset journal failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func sendPendingResetNotifications() {
+        guard dingTalkConfigured, !resetNotificationInFlight,
+              let quotaResetNoticeStore else { return }
+        let due = quotaResetNoticeStore.pending.filter {
+            QuotaResetDetector.shouldNotify($0.window) && ($0.lastAttemptAt.map { Date().timeIntervalSince($0) >= 300 } ?? true)
+        }
+        guard !due.isEmpty else { return }
+        resetNotificationInFlight = true
+        Task {
+            defer { resetNotificationInFlight = false }
+            for event in due {
+                do {
+                    try quotaResetNoticeStore.recordAttempt(event.id)
+                    try await dingTalkNotifier.send(event: event, keyword: dingTalkKeyword)
+                    try quotaResetNoticeStore.markDelivered(event.id)
+                    dingTalkNotice = "\(event.window.shortLabel)额度重置提醒已送达"
+                } catch {
+                    dingTalkNotice = "额度重置提醒发送失败，将稍后重试：\(error.localizedDescription)"
+                    logger.error("Quota reset notification failed: \(error.localizedDescription, privacy: .public)")
+                }
             }
         }
     }
@@ -572,6 +729,148 @@ final class AppState: ObservableObject {
         NSSound.beep()
     }
 
+    /// Tasks whose model and provider belong to different families. Each one
+    /// fails on every send until the stored pair is repaired.
+    var providerBindingIssues: [ActiveTask] {
+        tasks.filter { $0.providerBindingIssue != nil }
+    }
+
+    /// Everything that needs a repair: idle threads come from the database scan
+    /// and running tasks are merged in so a fresh mismatch shows up immediately.
+    var providerBindingAlerts: [ProviderBindingCandidate] {
+        var seen = Set<String>()
+        var result: [ProviderBindingCandidate] = []
+        for candidate in providerBindingCandidates where seen.insert(candidate.id).inserted {
+            result.append(candidate)
+        }
+        for task in tasks {
+            guard task.providerBindingIssue != nil, seen.insert(task.id).inserted else { continue }
+            result.append(
+                ProviderBindingCandidate(
+                    id: task.id,
+                    title: task.title,
+                    model: task.model ?? "",
+                    provider: task.modelProvider ?? "",
+                    updatedAt: task.updatedAt
+                )
+            )
+        }
+        return result
+    }
+
+    private func refreshProviderBindingCandidates() async {
+        do {
+            providerBindingCandidates = try await Task.detached(priority: .utility) {
+                try ThreadProviderRepairStore().findMismatchedThreads()
+            }.value
+        } catch {
+            logger.warning("Provider binding scan failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    func repairProviderBinding(for candidate: ProviderBindingCandidate) {
+        repairProviderBinding(threadID: candidate.id, title: candidate.title, issue: candidate.issue)
+    }
+
+    func repairProviderBinding(for task: ActiveTask) {
+        guard let issue = task.providerBindingIssue else { return }
+        repairProviderBinding(threadID: task.id, title: task.title, issue: issue)
+    }
+
+    private func repairProviderBinding(threadID: String, title: String, issue: ProviderBindingIssue) {
+        guard !providerRepairInFlight.contains(threadID) else { return }
+        let target: (model: String?, provider: String)
+        switch issue {
+        case .deepSeekModelOnOpenAIProvider:
+            // Keep the DeepSeek model the user picked and move the thread onto
+            // the DeepSeek provider it should have been routed to.
+            target = (nil, ProviderConfigManager.providerID)
+        case .openAIModelOnDeepSeekProvider:
+            // Align the model with the provider the thread already uses; the
+            // user never asked for an OpenAI model in a DeepSeek thread.
+            target = (providerStatus.deepSeekModel.rawValue, ProviderConfigManager.providerID)
+        }
+        providerRepairInFlight.insert(threadID)
+        providerRepairNotice = "正在修复“\(shortTitle(title))”的 Provider 绑定…"
+        Task {
+            defer { providerRepairInFlight.remove(threadID) }
+            do {
+                let model = target.model
+                let provider = target.provider
+                let record = try await Task.detached(priority: .userInitiated) {
+                    try ThreadProviderRepairStore().repair(threadID: threadID, model: model, provider: provider)
+                }.value
+                providerRepairNotice = "“\(shortTitle(title))”已绑定到 \(record.appliedProvider)，重新打开该对话即可继续"
+                logger.notice("Repaired provider binding for thread \(threadID, privacy: .public)")
+                refreshTasks()
+            } catch {
+                providerRepairNotice = "修复失败：\(error.localizedDescription)"
+                logger.error("Provider binding repair failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    func dismissProviderRepairNotice() {
+        providerRepairNotice = nil
+    }
+
+    /// DeepSeek sessions whose history holds an item between two tool outputs.
+    /// Such a history replays `No tool output found for tool call …` forever, so
+    /// the panel offers a one-click repair instead of leaving the task dead.
+    var toolPairingAlerts: [BrokenToolPairingCandidate] {
+        toolPairingCandidates.filter(\.isRepairable)
+    }
+
+    private func refreshToolPairingCandidatesIfNeeded() async {
+        guard !toolPairingScanStarted else { return }
+        toolPairingScanStarted = true
+        await refreshToolPairingCandidates()
+    }
+
+    func refreshToolPairingCandidates() async {
+        let codexHome = CodexLocator.codexHome
+        toolPairingCandidates = await Task.detached(priority: .utility) {
+            ThreadToolPairingRepair.scanSessions(
+                root: codexHome.appendingPathComponent("sessions", isDirectory: true),
+                codexHome: codexHome
+            )
+        }.value
+    }
+
+    func repairToolPairing(for candidate: BrokenToolPairingCandidate) {
+        guard !toolPairingRepairInFlight.contains(candidate.id) else { return }
+        toolPairingRepairInFlight.insert(candidate.id)
+        toolPairingNotice = "正在修复“\(shortTitle(candidate.title))”的工具配对…"
+        Task {
+            defer { toolPairingRepairInFlight.remove(candidate.id) }
+            do {
+                let codexHome = CodexLocator.codexHome
+                let supportDirectory = ProviderConfigPaths.live.supportDirectory
+                let record = try await Task.detached(priority: .userInitiated) {
+                    try ThreadToolPairingRepair.repair(
+                        candidate: candidate,
+                        backupRoot: ThreadToolPairingRepair.defaultBackupRoot(codexHome: codexHome),
+                        supportDirectory: supportDirectory
+                    )
+                }.value
+                if record.removedItems > 0 {
+                    toolPairingNotice = "“\(shortTitle(candidate.title))”已剔除 \(record.removedItems) 条损坏配对；退出并重开 Codex 桌面端后该任务即可继续"
+                    logger.notice("Repaired tool pairing for thread \(candidate.id, privacy: .public)")
+                } else {
+                    toolPairingNotice = "“\(shortTitle(candidate.title))”没有可自动修复的项，需要人工检查"
+                }
+                await refreshToolPairingCandidates()
+            } catch {
+                toolPairingNotice = "修复失败：\(error.localizedDescription)"
+                logger.error("Tool pairing repair failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    func dismissToolPairingNotice() {
+        toolPairingNotice = nil
+    }
+
     func openTask(_ task: ActiveTask) {
         guard taskOpenRoute(for: task) == .direct else {
             showTaskOpenIssue("该任务需要先切换到它原本的 Provider 和模型后才能安全打开。")
@@ -675,7 +974,11 @@ final class AppState: ObservableObject {
         Task {
             defer { providerCompatibilityInFlight = false }
             do {
-                let apiKey = deepSeekKeyConfigured ? try credentialStore.loadNonInteractively() : nil
+                let store = credentialStore
+                let hasKey = deepSeekKeyConfigured
+                let apiKey = try await Task.detached(priority: .utility) {
+                    hasKey ? try store.loadNonInteractively() : nil
+                }.value
                 deepSeekSessionAPIKey = apiKey
                 providerStatus = try providerManager.activateOpenAICompatibility(apiKey: apiKey)
                 startProviderLeaseHeartbeat()
